@@ -15,6 +15,13 @@ type User struct {
 	Email string `json:"email"`
 }
 
+func (u *User) EmailOrID() string {
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.ID + "@roost.local"
+}
+
 type Verifier struct {
 	baseURL string
 	apiKey  string

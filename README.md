@@ -44,6 +44,7 @@ npm run dev
 ## 待接
 
 - dslpha compatibility bridge (implemented on LangAlpha `feat/roost-billing`)
+- OIDC authorization-code + PKCE issuer for first-party products
 - roostbot / market 的 entitlement + usage adapter
 - 生产虎皮椒凭据、回调域名
 - 邀请成员、发票/退款、到期提醒

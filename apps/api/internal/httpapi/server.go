@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/billing/orders/{orderID}", s.withUser(s.getOrder))
 	mux.HandleFunc("POST /v1/payments/xunhupay/notify", s.xunhuNotify)
 	mux.HandleFunc("POST /v1/dev/orders/{orderID}/pay", s.withUser(s.devPay))
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.oidcDiscovery)
+	mux.HandleFunc("GET /oauth/authorize", s.oidcAuthorizeRedirect)
+	mux.HandleFunc("POST /oauth/token", s.oidcToken)
+	mux.HandleFunc("GET /oauth/userinfo", s.oidcUserinfo)
+	mux.HandleFunc("POST /v1/oauth/authorize", s.withUser(s.oidcApprove))
 	mux.HandleFunc("GET /api/auth/billing/leases/capability", s.withCompatService(s.compatCapability))
 	mux.HandleFunc("POST /api/auth/validate", s.withCompatService(s.compatValidate))
 	mux.HandleFunc("POST /api/auth/billing/leases/acquire", s.withCompatService(s.compatAcquire))
@@ -336,6 +342,121 @@ type leaseRequest struct {
 	RunRef            string `json:"run_ref"`
 	EstimatedCredits  int64  `json:"estimated_credits"`
 	TTLSeconds        int    `json:"ttl_seconds"`
+}
+
+func (s *Server) redirectURIAllowed(uri string) bool {
+	for _, allowed := range strings.Split(s.cfg.OIDCRedirectURIs, ",") {
+		if strings.TrimSpace(allowed) != "" && strings.TrimSpace(allowed) == uri {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) oidcDiscovery(w http.ResponseWriter, _ *http.Request) {
+	issuer := s.cfg.OIDCIssuer
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer": issuer,
+		"authorization_endpoint": issuer + "/oauth/authorize",
+		"token_endpoint": issuer + "/oauth/token",
+		"userinfo_endpoint": issuer + "/oauth/userinfo",
+		"response_types_supported": []string{"code"},
+		"subject_types_supported": []string{"public"},
+		"scopes_supported": []string{"openid", "email", "profile"},
+		"code_challenge_methods_supported": []string{"S256"},
+	})
+}
+
+func (s *Server) oidcAuthorizeRedirect(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.OIDCConsentURL == "" {
+		http.Error(w, "oauth not configured", http.StatusNotFound)
+		return
+	}
+	target := s.cfg.OIDCConsentURL + "?" + r.URL.RawQuery
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+func (s *Server) oidcApprove(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var req struct {
+		ResponseType string `json:"response_type"`
+		ClientID     string `json:"client_id"`
+		RedirectURI  string `json:"redirect_uri"`
+		State        string `json:"state"`
+		CodeChallenge string `json:"code_challenge"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid authorization body")
+		return
+	}
+	if req.ResponseType != "code" || req.ClientID != s.cfg.OIDCClientID || !s.redirectURIAllowed(req.RedirectURI) || req.CodeChallenge == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid client, redirect_uri or PKCE challenge")
+		return
+	}
+	org, err := s.store.EnsureOrg(r.Context(), u.ID, u.EmailOrID())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	code, err := s.store.CreateOAuthCode(r.Context(), req.ClientID, u.ID, u.EmailOrID(), org.ID, req.RedirectURI, req.CodeChallenge, 5*time.Minute)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	sep := "?"
+	if strings.Contains(req.RedirectURI, "?") {
+		sep = "&"
+	}
+	redirect := req.RedirectURI + sep + "code=" + url.QueryEscape(code)
+	if req.State != "" {
+		redirect += "&state=" + url.QueryEscape(req.State)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"redirect_url": redirect})
+}
+
+func (s *Server) oidcToken(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "invalid form")
+		return
+	}
+	clientID := r.PostForm.Get("client_id")
+	clientSecret := r.PostForm.Get("client_secret")
+	if clientID != s.cfg.OIDCClientID || (s.cfg.OIDCClientSecret != "" && subtle.ConstantTimeCompare([]byte(clientSecret), []byte(s.cfg.OIDCClientSecret)) != 1) {
+		writeError(w, http.StatusUnauthorized, "invalid_client", "invalid client")
+		return
+	}
+	if r.PostForm.Get("grant_type") != "authorization_code" {
+		writeError(w, http.StatusBadRequest, "unsupported_grant_type", "only authorization_code is supported")
+		return
+	}
+	grant, err := s.store.ConsumeOAuthCode(r.Context(), r.PostForm.Get("code"), clientID, r.PostForm.Get("redirect_uri"), r.PostForm.Get("code_verifier"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_grant", "code is invalid or expired")
+		return
+	}
+	token, expires, err := s.store.CreateOAuthToken(r.Context(), clientID, grant.UserID, grant.Email, grant.OrgID, time.Hour)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token": token, "token_type": "Bearer",
+		"expires_in": int(time.Until(expires).Seconds()), "scope": "openid email profile",
+	})
+}
+
+func (s *Server) oidcUserinfo(w http.ResponseWriter, r *http.Request) {
+	token := bearer(r)
+	g, _, err := s.store.OAuthTokenUser(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid_token", "invalid access token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sub": g.UserID, "email": g.Email, "email_verified": true, "org_id": g.OrgID,
+	})
 }
 
 func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {

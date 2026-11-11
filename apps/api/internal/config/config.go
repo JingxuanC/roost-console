@@ -20,6 +20,11 @@ type Config struct {
 	XunhuNotifyURL  string
 	XunhuReturnURL  string
 	Environment     string
+	OIDCIssuer      string
+	OIDCClientID    string
+	OIDCClientSecret string
+	OIDCRedirectURIs string
+	OIDCConsentURL  string
 }
 
 func Load() Config {
@@ -44,6 +49,11 @@ func Load() Config {
 		XunhuNotifyURL:  get("XUNHUPAY_NOTIFY_URL", ""),
 		XunhuReturnURL:  get("XUNHUPAY_RETURN_URL", ""),
 		Environment:     get("APP_ENV", "development"),
+		OIDCIssuer:      strings.TrimRight(get("OIDC_ISSUER", "https://www.roostbots.com/console-api"), "/"),
+		OIDCClientID:    get("OIDC_CLIENT_ID", "roostbot"),
+		OIDCClientSecret: get("OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURIs: get("OIDC_REDIRECT_URIS", ""),
+		OIDCConsentURL:  get("OIDC_CONSENT_URL", "https://www.roostbots.com/console/oauth/authorize"),
 	}
 }
 

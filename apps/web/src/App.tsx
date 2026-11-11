@@ -356,6 +356,67 @@ function Orders({ orders }: { orders: Order[] }) {
   );
 }
 
+function OAuthAuthorize({ session }: { session: Session }) {
+  const params = new URLSearchParams(window.location.search);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const clientId = params.get('client_id') ?? 'roostbot';
+
+  async function allow() {
+    setBusy(true);
+    setError('');
+    try {
+      const { redirect_url } = await api.authorizeOAuth(session.access_token, {
+        response_type: params.get('response_type') ?? 'code',
+        client_id: clientId,
+        redirect_uri: params.get('redirect_uri') ?? '',
+        state: params.get('state') ?? '',
+        code_challenge: params.get('code_challenge') ?? '',
+        code_challenge_method: params.get('code_challenge_method') ?? 'S256',
+        scope: params.get('scope') ?? 'openid email profile',
+      });
+      window.location.assign(redirect_url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '授权失败');
+      setBusy(false);
+    }
+  }
+
+  function deny() {
+    const redirect = params.get('redirect_uri');
+    if (!redirect) return;
+    const url = new URL(redirect);
+    url.searchParams.set('error', 'access_denied');
+    const state = params.get('state');
+    if (state) url.searchParams.set('state', state);
+    window.location.assign(url.toString());
+  }
+
+  return (
+    <main className="consent">
+      <div className="consent__card">
+        <Logo />
+        <p className="kicker" style={{ marginTop: 30 }}>AUTHORIZE APPLICATION</p>
+        <h1>连接 {clientId}</h1>
+        <p className="consent__lead">
+          {clientId} 请求使用你的 Roost 组织身份登录。它只能拿到你的用户 ID、邮箱和组织
+          ID，不能读取支付凭据或直接修改余额。
+        </p>
+        <div className="consent__org">
+          <span className="tag tag--live">SIGNED IN</span>
+          <span>{session.user.email}</span>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="consent__actions">
+          <button className="btn btn--ghost" onClick={deny} disabled={busy}>取消</button>
+          <button className="btn btn--ink" onClick={allow} disabled={busy}>{busy ? '授权中…' : '允许访问'}</button>
+        </div>
+        <p className="consent__foot">Roost Cloud · 统一组织身份</p>
+      </div>
+    </main>
+  );
+}
+
 function Console({ session }: { session: Session }) {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -443,10 +504,12 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  const isOAuth = window.location.pathname.includes('/oauth/authorize');
   const view = useMemo(() => {
     if (loading) return <div className="loading"><p>加载中…</p></div>;
+    if (isOAuth) return session ? <OAuthAuthorize session={session} /> : <AuthScreen />;
     return session ? <Console session={session} /> : <AuthScreen />;
-  }, [loading, session]);
+  }, [isOAuth, loading, session]);
 
   return view;
 }
