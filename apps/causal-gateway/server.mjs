@@ -10,6 +10,22 @@ const TOKENS_FILE = process.env.CAUSAL_TOKENS_FILE || '/opt/mcp-suite/causal-mem
 const CONSOLE_URL = (process.env.ROOST_CONSOLE_API_URL || 'https://www.roostbots.com/console-api').replace(/\/+$/, '');
 const SERVICE_SECRET = process.env.ROOST_SERVICE_SECRET || '';
 const CREDITS_PER_CALL = Number(process.env.CAUSAL_CREDITS_PER_CALL || 1);
+const SERVICE_NAME = process.env.ROOST_SERVICE_NAME || 'causal';
+
+function signedHeaders(method, path, body) {
+  const ts = String(Math.floor(Date.now() / 1000));
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const digest = crypto.createHash('sha256').update(body).digest('hex');
+  const input = `${SERVICE_NAME}\n${ts}\n${nonce}\n${method}\n${path}\n${digest}`;
+  const signature = crypto.createHmac('sha256', SERVICE_SECRET).update(input).digest('hex');
+  return {
+    'X-Roost-Service': SERVICE_NAME,
+    'X-Roost-Timestamp': ts,
+    'X-Roost-Nonce': nonce,
+    'X-Roost-Signature': signature,
+    'content-type': 'application/json',
+  };
+}
 
 function sha256(text) { return crypto.createHash('sha256').update(text).digest('hex'); }
 function tokenMap() {
@@ -25,7 +41,7 @@ async function charge(orgId, ref, credits) {
   try {
     const response = await fetch(CONSOLE_URL + '/internal/v1/usage/charge', {
       method: 'POST',
-      headers: { authorization: 'Bearer ' + SERVICE_SECRET, 'content-type': 'application/json' },
+      headers: signedHeaders('POST', '/internal/v1/usage/charge', JSON.stringify({ org_id: orgId, product: 'causal-memory', ref, credits })),
       body: JSON.stringify({ org_id: orgId, product: 'causal-memory', ref, credits }),
       signal: AbortSignal.timeout(8000),
     });

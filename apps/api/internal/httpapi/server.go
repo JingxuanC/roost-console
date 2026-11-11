@@ -137,8 +137,10 @@ func (s *Server) withService(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "bad_request", "could not read body")
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.ServiceSecret)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service token")
+		signed := auth.VerifyServiceSignature(r, body, s.cfg.ServiceSecret)
+		legacy := s.cfg.LegacyServiceAuth && subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.ServiceSecret)) == 1
+		if !signed && !legacy {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
 			return
 		}
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
@@ -558,8 +560,15 @@ func (s *Server) oidcUserinfo(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Token")), []byte(s.cfg.ServiceSecret)) != 1 {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service token")
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "could not read body")
+			return
+		}
+		signed := auth.VerifyServiceSignature(r, body, s.cfg.ServiceSecret)
+		legacy := s.cfg.LegacyCompatAuth && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Token")), []byte(s.cfg.ServiceSecret)) == 1
+		if !signed && !legacy {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
 			return
 		}
 		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
@@ -567,6 +576,7 @@ func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "bad_request", "X-User-Id is required")
 			return
 		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		next(w, r.WithContext(context.WithValue(r.Context(), userKey, &auth.User{ID: userID})))
 	}
 }

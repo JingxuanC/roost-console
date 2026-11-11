@@ -37,12 +37,12 @@
 
 | ID | 严重度 | 发现 | 状态 |
 |---|---|---|---|
-| SEC-01 | High | 内部服务使用静态共享 Bearer token | 待修 |
+| SEC-01 | High | 内部服务使用静态共享 Bearer token | 部分修复：HMAC + 防重放已上线 |
 | SEC-02 | High | OIDC 单 client secret 被多产品共用，token endpoint 无限流 | 待修 |
-| SEC-03 | High | 登录、支付回调、token 签发、MCP 调用缺少统一限流 | 待修 |
+| SEC-03 | High | 登录、支付回调、token 签发、MCP 调用缺少统一限流 | 部分修复：Nginx 已加 API/auth/MCP 限流 |
 | SEC-04 | Medium | causal token 无每组织上限/撤销界面，sync 暴露全部 token hash | 待修 |
 | SEC-05 | Medium | 生产仍有测试账号、测试 causal token 和演示数据 | 待清理 |
-| SEC-06 | Medium | roostbot 已隐藏入口但 API 仍公开可达 | 待决策 |
+| SEC-06 | Medium | roostbot 已隐藏入口但 API 仍公开可达 | 已修复：service 停止，API 返回 404 |
 | SEC-07 | Medium | `roost_api` DB 角色带 `BYPASSRLS`，RLS 不是纵深防御 | 待修 |
 | SEC-08 | Medium | `/console-sb` 反向代理未显式校验证书 | 待修 |
 | SEC-09 | Medium | 支付创建响应未验签；退款/退款中状态未闭环 | 待修 |
@@ -56,7 +56,10 @@
 
 ## 4. 重点问题详情
 
-### SEC-01 内部服务静态 Bearer token
+### SEC-01 内部服务认证
+
+**本轮进展：** Console 的内部 `/internal/v1/*` 已强制 HMAC 签名；market、causal gateway/storage/token-sync、dslpha 兼容层都已改为发送签名。旧 Bearer 和旧 X-Service-Token 在内部接口上已关闭。  
+**仍未完成：** 所有服务仍共用同一个 `SERVICE_SECRET`，没有按服务拆分 secret/scope；这是剩余风险。
 
 证据：
 
@@ -89,11 +92,15 @@
 
 建议：建立 OIDC client registry；market/roostbot 不同 client id/secret；token endpoint 加限流；定期轮换。
 
-### SEC-03 限流缺失
+### SEC-03 限流
 
-- Nginx `roostbots.conf` 没有 `limit_req`。
-- causal 网关没有 per-token QPS/并发限制。
-- 支付 notify、OIDC token、登录代理、token 签发都直接到后端。
+**本轮进展：** Nginx 已加：
+
+- `/console-api/`：20 r/s，burst 40
+- `/console-sb/`：5 r/s，burst 20
+- causal `/memory/`：10 r/s，burst 20
+
+**仍未完成：** 支付 notify、OIDC token、token 签发没有独立应用层 bucket；causal 没有 per-org QPS。
 
 影响：暴力破解、token 猜测、MCP 调用刷量、支付回调洪水、资源耗尽。
 
@@ -119,9 +126,19 @@ roost-test@example.com
 
 测试 token 存在于 causal token 文件；测试账号口令已知。正式发布前必须删除/轮换，否则是直接入口。
 
-### SEC-06 roostbot 暴露
+### SEC-06 roostbot 暴露（已修复）
 
-`https://roostbots.com/` 已 302 到官网，但：
+已执行：
+
+```bash
+systemctl stop roost-api
+systemctl disable roost-api
+# Nginx: /api/ -> 404, /oauth/callback -> 404
+```
+
+验证：`https://roostbots.com/api/auth/providers` → 404，裸域仍 302 到官网。
+
+原问题：
 
 ```text
 https://roostbots.com/api/auth/providers
@@ -222,6 +239,16 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains
 3. 验证生产服务健康、内部接口 401、causal token/MCP 鉴权正常。
 4. 记录 Causal Memory token 同步与计费服务，便于后续审计。
 
+## 7.1 本轮 P0 加固结果
+
+- 内部服务签名：HMAC-SHA256(timestamp + nonce + method + URI + body hash)，5 分钟窗口，nonce 单次使用。
+- `withService` 内部接口已强制签名；旧 Bearer 返回 401。
+- dslpha 兼容层已发送签名；旧 `X-Service-Token` 在 compat 接口上已关闭。
+- market `roostbilling`、causal gateway/storage/token-sync 已发送签名。
+- Nginx 已加 API/auth/MCP 限流。
+- roostbot `roost-api.service` 已停止并禁用，`/api/` 返回 404。
+- 新增 HMAC 单测（有效/错误 secret/body 篡改/path 篡改/replay/时钟偏移）。
+
 ## 8. 建议优先级
 
 P0（发布前）：
@@ -243,6 +270,14 @@ P2：
 
 10. SEC-07：DB 角色/RLS 纵深。
 11. SEC-11/12/13/14/15/16：key 生命周期、CORS、dev 路由移除、CSP、storage 降级、token 审计。
+
+## 8.1 仍需完成（P2）
+
+- 把单一 `SERVICE_SECRET` 拆成 per-service secret/scope，并加轮换。
+- 支付 notify/OIDC token/token 签发单独限流。
+- OIDC client 拆分。
+- `proxy_ssl_verify on`。
+- 测试账号/测试 causal token 清理。
 
 ## 9. 限制
 
