@@ -190,3 +190,51 @@ func (s *Store) Release(ctx context.Context, leaseID string) error {
 	}
 	return tx.Commit(ctx)
 }
+
+// ExpireLeases releases active leases whose deadline passed. It runs on a
+// timer so a crashed product cannot leave a user's credits frozen forever.
+func (s *Store) ExpireLeases(ctx context.Context) (int, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `
+		select id, org_id, reserved_credits from billing.usage_leases
+		where status='active' and expires_at < now()
+		order by expires_at limit 100
+		for update skip locked`)
+	if err != nil {
+		return 0, err
+	}
+	type expired struct {
+		id       string
+		orgID    string
+		reserved int64
+	}
+	var list []expired
+	for rows.Next() {
+		var e expired
+		if err := rows.Scan(&e.id, &e.orgID, &e.reserved); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		list = append(list, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, e := range list {
+		if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=greatest(0,reserved_credits-$2),version=version+1,updated_at=now() where org_id=$1`, e.orgID, e.reserved); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(ctx, `update billing.usage_leases set status='expired' where id=$1`, e.id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(list), nil
+}

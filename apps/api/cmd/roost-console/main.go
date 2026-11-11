@@ -63,6 +63,18 @@ func main() {
 		NotifyURL: cfg.XunhuNotifyURL, ReturnURL: cfg.XunhuReturnURL, HTTP: &http.Client{Timeout: 20 * time.Second},
 	}
 	srv := httpapi.New(cfg, store, verifier, pay, log)
+go func() {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		n, err := store.ExpireLeases(context.Background())
+		if err != nil {
+			log.Warn("lease expiry failed", "err", err)
+		} else if n > 0 {
+			log.Info("expired stale leases", "count", n)
+		}
+	}
+}()
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           srv.Handler(),
