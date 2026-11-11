@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,9 +19,20 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/auth"
 	"github.com/JingxuanC/roost-console/apps/api/internal/billing"
 	"github.com/JingxuanC/roost-console/apps/api/internal/config"
-	"github.com/JingxuanC/roost-console/apps/api/internal/payment"
 	"github.com/JingxuanC/roost-console/apps/api/internal/oidc"
+	"github.com/JingxuanC/roost-console/apps/api/internal/payment"
 )
+
+var sCausalMCPURL = strings.TrimSpace(getenvDefault("CAUSAL_MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp"))
+
+func getenvDefault(k, d string) string {
+	if v := strings.TrimSpace(getenv(k)); v != "" {
+		return v
+	}
+	return d
+}
+
+func getenv(k string) string { return os.Getenv(k) }
 
 type Server struct {
 	cfg      config.Config
@@ -48,6 +60,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/me", s.withUser(s.me))
 	mux.HandleFunc("GET /v1/billing/plans", s.withUser(s.plans))
+	mux.HandleFunc("POST /v1/orgs/{orgID}/products/{product}/token", s.withUser(s.issueProductToken))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/products/{product}/tokens", s.withUser(s.listProductTokens))
+	mux.HandleFunc("POST /internal/v1/products/{product}/tokens", s.withService(s.internalProductTokens))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/billing", s.withUser(s.billingView))
 	mux.HandleFunc("GET /v1/billing/orders", s.withUser(s.listOrders))
 	mux.HandleFunc("POST /v1/billing/orders", s.withUser(s.createOrder))
@@ -151,6 +166,62 @@ func (s *Server) requireOrg(w http.ResponseWriter, r *http.Request, orgID string
 		return false
 	}
 	return true
+}
+
+func (s *Server) issueProductToken(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("orgID")
+	if !s.requireOrg(w, r, orgID) {
+		return
+	}
+	product := r.PathValue("product")
+	if product != "causal-memory" {
+		writeError(w, http.StatusBadRequest, "unsupported_product", "token issuance is only available for causal-memory")
+		return
+	}
+	token, meta, err := s.store.IssueProductToken(r.Context(), orgID, product)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token": token, "token_hash": meta.TokenHash, "org_id": orgID, "product": product,
+		"mcp_url": causalMemoryMCPURL(),
+	})
+}
+
+func (s *Server) listProductTokens(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("orgID")
+	if !s.requireOrg(w, r, orgID) {
+		return
+	}
+	product := r.PathValue("product")
+	tokens, err := s.store.ListProductTokens(r.Context(), orgID, product)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens, "mcp_url": causalMemoryMCPURL()})
+}
+
+func (s *Server) internalProductTokens(w http.ResponseWriter, r *http.Request) {
+	product := r.PathValue("product")
+	if product != "causal-memory" {
+		writeError(w, http.StatusBadRequest, "unsupported_product", "unsupported product")
+		return
+	}
+	tokens, err := s.store.ListAllProductTokens(r.Context(), product)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+}
+
+func causalMemoryMCPURL() string {
+	if v := strings.TrimSpace(sCausalMCPURL); v != "" {
+		return v
+	}
+	return "https://causal-memory.com/memory/mcp"
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -345,11 +416,11 @@ func (s *Server) xunhuNotify(w http.ResponseWriter, r *http.Request) {
 }
 
 type leaseRequest struct {
-	OrgID             string `json:"org_id"`
-	Product           string `json:"product"`
-	RunRef            string `json:"run_ref"`
-	EstimatedCredits  int64  `json:"estimated_credits"`
-	TTLSeconds        int    `json:"ttl_seconds"`
+	OrgID            string `json:"org_id"`
+	Product          string `json:"product"`
+	RunRef           string `json:"run_ref"`
+	EstimatedCredits int64  `json:"estimated_credits"`
+	TTLSeconds       int    `json:"ttl_seconds"`
 }
 
 func (s *Server) redirectURIAllowed(uri string) bool {
@@ -364,20 +435,23 @@ func (s *Server) redirectURIAllowed(uri string) bool {
 func (s *Server) oidcDiscovery(w http.ResponseWriter, _ *http.Request) {
 	issuer := s.cfg.OIDCIssuer
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer": issuer,
-		"authorization_endpoint": issuer + "/oauth/authorize",
-		"token_endpoint": issuer + "/oauth/token",
-		"userinfo_endpoint": issuer + "/oauth/userinfo",
-		"response_types_supported": []string{"code"},
-		"subject_types_supported": []string{"public"},
-		"scopes_supported": []string{"openid", "email", "profile"},
+		"issuer":                           issuer,
+		"authorization_endpoint":           issuer + "/oauth/authorize",
+		"token_endpoint":                   issuer + "/oauth/token",
+		"userinfo_endpoint":                issuer + "/oauth/userinfo",
+		"response_types_supported":         []string{"code"},
+		"subject_types_supported":          []string{"public"},
+		"scopes_supported":                 []string{"openid", "email", "profile"},
 		"code_challenge_methods_supported": []string{"S256"},
-		"jwks_uri": issuer + "/oauth/jwks.json",
+		"jwks_uri":                         issuer + "/oauth/jwks.json",
 	})
 }
 
 func (s *Server) oidcJWKS(w http.ResponseWriter, _ *http.Request) {
-	if s.signer == nil { http.Error(w, "oidc not available", http.StatusServiceUnavailable); return }
+	if s.signer == nil {
+		http.Error(w, "oidc not available", http.StatusServiceUnavailable)
+		return
+	}
 	writeJSON(w, http.StatusOK, s.signer.JWKS())
 }
 
@@ -393,13 +467,13 @@ func (s *Server) oidcAuthorizeRedirect(w http.ResponseWriter, r *http.Request) {
 func (s *Server) oidcApprove(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var req struct {
-		ResponseType string `json:"response_type"`
-		ClientID     string `json:"client_id"`
-		RedirectURI  string `json:"redirect_uri"`
-		State        string `json:"state"`
+		ResponseType  string `json:"response_type"`
+		ClientID      string `json:"client_id"`
+		RedirectURI   string `json:"redirect_uri"`
+		State         string `json:"state"`
 		CodeChallenge string `json:"code_challenge"`
-		Scope        string `json:"scope"`
-		Nonce        string `json:"nonce"`
+		Scope         string `json:"scope"`
+		Nonce         string `json:"nonce"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid authorization body")
@@ -458,7 +532,10 @@ func (s *Server) oidcToken(w http.ResponseWriter, r *http.Request) {
 	idToken := ""
 	if s.signer != nil {
 		idToken, err = s.signer.SignIDToken(s.cfg.OIDCIssuer, clientID, grant.UserID, grant.Email, grant.OrgID, grant.Nonce, time.Hour)
-		if err != nil { s.fail(w, err); return }
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -692,10 +769,10 @@ func (s *Server) charge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) settleByRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OrgID   string `json:"org_id"`
-		Product string `json:"product"`
-		RunRef  string `json:"run_ref"`
-		ActualCredits int64 `json:"actual_credits"`
+		OrgID         string `json:"org_id"`
+		Product       string `json:"product"`
+		RunRef        string `json:"run_ref"`
+		ActualCredits int64  `json:"actual_credits"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrgID == "" || req.Product == "" || req.RunRef == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "org_id, product and run_ref are required")
@@ -711,11 +788,11 @@ func (s *Server) settleByRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) drawByRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OrgID string `json:"org_id"`
+		OrgID   string `json:"org_id"`
 		Product string `json:"product"`
-		RunRef string `json:"run_ref"`
-		Ref string `json:"ref"`
-		Credits int64 `json:"credits"`
+		RunRef  string `json:"run_ref"`
+		Ref     string `json:"ref"`
+		Credits int64  `json:"credits"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrgID == "" || req.Product == "" || req.RunRef == "" || req.Ref == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "org_id, product, run_ref and ref are required")

@@ -74,6 +74,8 @@ export const api = {
   getOrder: (token: string, id: string) => request<{ order: Order }>(`/v1/billing/orders/${id}`, token),
   devPay: (token: string, id: string) => request<{ ok: boolean }>(`/v1/dev/orders/${id}/pay`, token, { method: 'POST' }),
   orders: (token: string) => request<{ orders: Order[] }>('/v1/billing/orders', token),
+  issueCausalToken: (token: string, orgId: string) =>
+    request<{ token: string; mcp_url: string; org_id: string }>(`/v1/orgs/${orgId}/products/causal-memory/token`, token, { method: 'POST' }),
   authorizeOAuth: (token: string, body: Record<string, string>) =>
     request<{ redirect_url: string }>('/v1/oauth/authorize', token, { method: 'POST', body: JSON.stringify(body) }),
 };

@@ -204,6 +204,60 @@ function Products({ billing }: { billing: BillingView }) {
   );
 }
 
+function CausalMemory({ token, orgId }: { token: string; orgId: string }) {
+  const [mcpToken, setMcpToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  async function issue() {
+    setBusy(true);
+    setError('');
+    try {
+      const issued = await api.issueCausalToken(token, orgId);
+      setMcpToken(issued.token);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy() {
+    if (!mcpToken) return;
+    await navigator.clipboard.writeText(mcpToken);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <section className="causal" id="causal-memory">
+      <div>
+        <p className="kicker">CAUSAL MEMORY · MCP</p>
+        <h2>把记忆接到 Agent。</h2>
+        <p className="muted">
+          用组织 token 连接 Causal Memory MCP。调用和存储按组织额度计费，
+          与 market、dslpha 共用同一个钱包。
+        </p>
+        <code className="causal__endpoint">https://causal-memory.com/memory/mcp</code>
+      </div>
+      <div className="causal__action">
+        {mcpToken ? (
+          <>
+            <p className="kicker">TOKEN · 只显示一次</p>
+            <code className="causal__token">{mcpToken}</code>
+            <button className="btn btn--ghost btn--small" onClick={() => void copy()}>{copied ? '已复制' : '复制 token'}</button>
+            <p className="muted causal__hint">在 MCP 客户端里配置 Authorization: Bearer &lt;token&gt;</p>
+          </>
+        ) : (
+          <button className="btn btn--ink" onClick={() => void issue()} disabled={busy}>{busy ? '生成中…' : '生成 MCP Token'}</button>
+        )}
+        {error && <p className="form-error">{error}</p>}
+      </div>
+    </section>
+  );
+}
+
 function Plans({ plans, current, onBuy, busy }: { plans: Plan[]; current: string; onBuy: (sku: string) => void; busy: string }) {
   return (
     <section className="section" id="plans">
@@ -480,6 +534,7 @@ function Console({ session }: { session: Session }) {
         {error && <p className="form-error">{error}</p>}
         <WalletCard billing={me.billing} />
         <Products billing={me.billing} />
+        <CausalMemory token={token} orgId={me.org.id} />
         <Plans plans={plans} current={me.billing.plan.code} onBuy={buy} busy={busy} />
         <Orders orders={orders} />
         <footer className="page__foot">
