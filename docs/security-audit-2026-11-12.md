@@ -118,6 +118,7 @@ Nginx 已加：
 | `/v1/payments/xunhupay/notify` | 来源 IP | 120/min |
 | `/oauth/token` | 来源 IP | 60/min |
 | `/v1/orgs/{org}/products/{product}/token` | 用户 | 5/min |
+| causal `/memory/mcp` | Roost org | 5/s |
 
 超限返回 `429` 和 `Retry-After`。实测：
 
@@ -127,7 +128,7 @@ OIDC token       60 × 401 +  5 × 429
 product token     5 × 201 +  1 × 429
 ```
 
-causal 仍有 Nginx 10 r/s；per-org QPS 应用层可以后续再加。
+causal 在 Nginx 10 r/s 之外又加了 per-org 5 QPS；超限在扣费前返回 429。
 
 影响：暴力破解、token 猜测、MCP 调用刷量、支付回调洪水、资源耗尽。
 
@@ -282,7 +283,7 @@ P0（发布前）：
 
 1. SEC-05：删除测试账号、测试 causal token、演示组织。
 2. SEC-06：已停止 roost-api，定期确认服务未被重新启用。
-3. causal per-org QPS 和支付对账。
+3. 支付对账和退款状态。
 
 P1：
 
@@ -304,6 +305,23 @@ P2：
 - OIDC token 按来源 IP。
 - 产品 token 按已认证 user。
 - 可通过 `RATE_PAYMENT_NOTIFY_PER_MIN`、`RATE_OIDC_TOKEN_PER_MIN`、`RATE_PRODUCT_TOKEN_PER_MIN` 调整。
+
+## 7.3 causal per-org QPS
+
+`apps/causal-gateway/server.mjs` 在 token 解析后、扣费前按 org 做一秒固定窗口：
+
+```text
+CAUSAL_QPS_PER_ORG=5
+```
+
+实测同一 org 10 个并发请求：
+
+```text
+5 × 200
+5 × 429
+```
+
+被限流的请求不会扣 credit。
 
 ## 8.1 仍需完成（P2）
 
