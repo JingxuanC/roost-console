@@ -26,3 +26,12 @@ on conflict (org_id, product) do update set
   monthly_cap_credits = excluded.monthly_cap_credits,
   valid_until = coalesce(excluded.valid_until, billing.entitlements.valid_until),
   updated_at = now();
+
+update billing.entitlements e
+set monthly_cap_credits = (p.product_caps->>e.product)::bigint,
+    updated_at = now()
+from public.organizations o
+join billing.plans p on p.code = o.plan_code
+where e.org_id = o.id
+  and e.product in ('dsalpha','market','causal-memory')
+  and p.product_caps ? e.product;
