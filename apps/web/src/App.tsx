@@ -374,6 +374,7 @@ function OAuthAuthorize({ session }: { session: Session }) {
         code_challenge: params.get('code_challenge') ?? '',
         code_challenge_method: params.get('code_challenge_method') ?? 'S256',
         scope: params.get('scope') ?? 'openid email profile',
+        nonce: params.get('nonce') ?? '',
       });
       window.location.assign(redirect_url);
     } catch (err) {

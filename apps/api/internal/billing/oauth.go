@@ -30,12 +30,12 @@ func PKCEChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-func (s *Store) CreateOAuthCode(ctx context.Context, clientID, userID, email, orgID, redirectURI, challenge string, ttl time.Duration) (string, error) {
+func (s *Store) CreateOAuthCode(ctx context.Context, clientID, userID, email, orgID, redirectURI, challenge, nonce string, ttl time.Duration) (string, error) {
 	code := randomURLToken()
 	_, err := s.Pool.Exec(ctx, `
-		insert into billing.oauth_codes (code_hash,client_id,user_id,email,org_id,redirect_uri,code_challenge,expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,now()+make_interval(secs=>$8))`,
-		tokenHash(code), clientID, userID, email, orgID, redirectURI, challenge, int(ttl.Seconds()))
+		insert into billing.oauth_codes (code_hash,client_id,user_id,email,org_id,redirect_uri,code_challenge,nonce,expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,now()+make_interval(secs=>$9))`,
+		tokenHash(code), clientID, userID, email, orgID, redirectURI, challenge, nonce, int(ttl.Seconds()))
 	return code, err
 }
 
@@ -43,6 +43,7 @@ type OAuthGrant struct {
 	UserID string
 	Email  string
 	OrgID  string
+	Nonce  string
 }
 
 func (s *Store) ConsumeOAuthCode(ctx context.Context, code, clientID, redirectURI, verifier string) (OAuthGrant, error) {
@@ -56,9 +57,9 @@ func (s *Store) ConsumeOAuthCode(ctx context.Context, code, clientID, redirectUR
 	var used *time.Time
 	var expires time.Time
 	err = tx.QueryRow(ctx, `
-		select user_id,email,org_id,code_challenge,used_at,expires_at
+		select user_id,email,org_id,code_challenge,coalesce(nonce,''),used_at,expires_at
 		from billing.oauth_codes where code_hash=$1 for update`, tokenHash(code)).
-		Scan(&g.UserID, &g.Email, &g.OrgID, &challenge, &used, &expires)
+		Scan(&g.UserID, &g.Email, &g.OrgID, &challenge, &g.Nonce, &used, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OAuthGrant{}, ErrOAuthInvalid
 	}

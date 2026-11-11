@@ -19,6 +19,7 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/billing"
 	"github.com/JingxuanC/roost-console/apps/api/internal/config"
 	"github.com/JingxuanC/roost-console/apps/api/internal/payment"
+	"github.com/JingxuanC/roost-console/apps/api/internal/oidc"
 )
 
 type Server struct {
@@ -27,6 +28,7 @@ type Server struct {
 	verifier *auth.Verifier
 	pay      *payment.Client
 	log      *slog.Logger
+	signer   *oidc.Signer
 }
 
 type ctxKey string
@@ -37,7 +39,8 @@ func New(cfg config.Config, store *billing.Store, verifier *auth.Verifier, pay *
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cfg: cfg, store: store, verifier: verifier, pay: pay, log: log}
+	signer, _ := oidc.NewSigner()
+	return &Server{cfg: cfg, store: store, verifier: verifier, pay: pay, log: log, signer: signer}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -55,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/authorize", s.oidcAuthorizeRedirect)
 	mux.HandleFunc("POST /oauth/token", s.oidcToken)
 	mux.HandleFunc("GET /oauth/userinfo", s.oidcUserinfo)
+	mux.HandleFunc("GET /oauth/jwks.json", s.oidcJWKS)
 	mux.HandleFunc("POST /v1/oauth/authorize", s.withUser(s.oidcApprove))
 	mux.HandleFunc("GET /api/auth/billing/leases/capability", s.withCompatService(s.compatCapability))
 	mux.HandleFunc("POST /api/auth/validate", s.withCompatService(s.compatValidate))
@@ -366,7 +370,13 @@ func (s *Server) oidcDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"subject_types_supported": []string{"public"},
 		"scopes_supported": []string{"openid", "email", "profile"},
 		"code_challenge_methods_supported": []string{"S256"},
+		"jwks_uri": issuer + "/oauth/jwks.json",
 	})
+}
+
+func (s *Server) oidcJWKS(w http.ResponseWriter, _ *http.Request) {
+	if s.signer == nil { http.Error(w, "oidc not available", http.StatusServiceUnavailable); return }
+	writeJSON(w, http.StatusOK, s.signer.JWKS())
 }
 
 func (s *Server) oidcAuthorizeRedirect(w http.ResponseWriter, r *http.Request) {
@@ -387,6 +397,7 @@ func (s *Server) oidcApprove(w http.ResponseWriter, r *http.Request) {
 		State        string `json:"state"`
 		CodeChallenge string `json:"code_challenge"`
 		Scope        string `json:"scope"`
+		Nonce        string `json:"nonce"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid authorization body")
@@ -401,7 +412,7 @@ func (s *Server) oidcApprove(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	code, err := s.store.CreateOAuthCode(r.Context(), req.ClientID, u.ID, u.EmailOrID(), org.ID, req.RedirectURI, req.CodeChallenge, 5*time.Minute)
+	code, err := s.store.CreateOAuthCode(r.Context(), req.ClientID, u.ID, u.EmailOrID(), org.ID, req.RedirectURI, req.CodeChallenge, req.Nonce, 5*time.Minute)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -442,9 +453,14 @@ func (s *Server) oidcToken(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	idToken := ""
+	if s.signer != nil {
+		idToken, err = s.signer.SignIDToken(s.cfg.OIDCIssuer, clientID, grant.UserID, grant.Email, grant.OrgID, grant.Nonce, time.Hour)
+		if err != nil { s.fail(w, err); return }
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": token, "token_type": "Bearer",
+		"access_token": token, "id_token": idToken, "token_type": "Bearer",
 		"expires_in": int(time.Until(expires).Seconds()), "scope": "openid email profile",
 	})
 }
