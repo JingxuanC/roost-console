@@ -37,7 +37,7 @@
 
 | ID | 严重度 | 发现 | 状态 |
 |---|---|---|---|
-| SEC-01 | High | 内部服务使用静态共享 Bearer token | 部分修复：HMAC + 防重放已上线 |
+| SEC-01 | High | 内部服务使用静态共享 Bearer token | 已修复：per-service secret + scope + 轮换 |
 | SEC-02 | High | OIDC 单 client secret 被多产品共用，token endpoint 无限流 | 待修 |
 | SEC-03 | High | 登录、支付回调、token 签发、MCP 调用缺少统一限流 | 部分修复：Nginx 已加 API/auth/MCP 限流 |
 | SEC-04 | Medium | causal token 无每组织上限/撤销界面，sync 暴露全部 token hash | 待修 |
@@ -56,10 +56,21 @@
 
 ## 4. 重点问题详情
 
-### SEC-01 内部服务认证
+### SEC-01 内部服务认证（已修复）
 
-**本轮进展：** Console 的内部 `/internal/v1/*` 已强制 HMAC 签名；market、causal gateway/storage/token-sync、dslpha 兼容层都已改为发送签名。旧 Bearer 和旧 X-Service-Token 在内部接口上已关闭。  
-**仍未完成：** 所有服务仍共用同一个 `SERVICE_SECRET`，没有按服务拆分 secret/scope；这是剩余风险。
+已改成 per-service secret + scope：
+
+```text
+market      resolve / entitlement / lease
+dslpha      validate / compat lease
+causal      usage charge
+causal-sync token list
+root        仅运维
+```
+
+每个服务只拿到自己的 secret；旧共享 secret 已从 Console 配置移除，旧 secret 实测返回 401。HMAC 带 timestamp、nonce、method、URI 和 body digest；nonce 单次使用。
+
+实现细节见 [SERVICE-AUTH.md](SERVICE-AUTH.md)。
 
 证据：
 
@@ -254,13 +265,12 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains
 P0（发布前）：
 
 1. SEC-05：删除测试账号、测试 causal token、演示组织。
-2. SEC-01：内部服务 mTLS/HMAC + 分服务 secret。
-3. SEC-03：Nginx + 应用限流；支付/OIDC/token 单独 bucket。
-4. SEC-06：停掉或防火墙 roostbot 公开 API。
+2. SEC-03：支付/OIDC/token 签发单独限流（Nginx 基础限流已加）。
+3. SEC-06：已停止 roost-api，定期确认服务未被重新启用。
 
 P1：
 
-5. SEC-02：拆 OIDC client/secret，做轮换。
+4. SEC-02：拆 OIDC client/secret，做轮换。
 6. SEC-04：token 上限、撤销、审计。
 7. SEC-08：`proxy_ssl_verify on` + CA 固定。
 8. SEC-09：支付响应验签、退款状态、对账。

@@ -137,15 +137,58 @@ func (s *Server) withService(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "bad_request", "could not read body")
 			return
 		}
-		signed := auth.VerifyServiceSignature(r, body, s.cfg.ServiceSecret)
-		legacy := s.cfg.LegacyServiceAuth && subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.ServiceSecret)) == 1
-		if !signed && !legacy {
+		service := strings.TrimSpace(r.Header.Get("X-Roost-Service"))
+		if !s.verifyService(service, r, body) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
+			return
+		}
+		if !serviceAllows(service, r.Method, r.URL.Path) {
+			writeError(w, http.StatusForbidden, "forbidden", "service scope does not allow this endpoint")
 			return
 		}
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		next(w, r)
 	}
+}
+
+func (s *Server) verifyService(service string, r *http.Request, body []byte) bool {
+	if service == "" {
+		return false
+	}
+	for _, secret := range s.cfg.ServiceSecrets[service] {
+		if secret != "" && auth.VerifyServiceSignature(r, body, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceAllows(service, method, path string) bool {
+	allowed, ok := serviceScopes[service]
+	if !ok {
+		return false
+	}
+	for _, prefix := range allowed {
+		if prefix == "*" || path == prefix || strings.HasPrefix(path, strings.TrimRight(prefix, "/")+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+var serviceScopes = map[string][]string{
+	"market": {
+		"/internal/v1/orgs/resolve-user",
+		"/internal/v1/entitlements/resolve",
+		"/internal/v1/usage/leases",
+	},
+	"dslpha": {
+		"/api/auth/validate",
+		"/api/auth/billing/leases",
+	},
+	"causal":      {"/internal/v1/usage/charge"},
+	"causal-sync": {"/internal/v1/products/causal-memory/tokens"},
+	"root":        {"*"},
 }
 
 func bearer(r *http.Request) string {
@@ -565,10 +608,16 @@ func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "bad_request", "could not read body")
 			return
 		}
-		signed := auth.VerifyServiceSignature(r, body, s.cfg.ServiceSecret)
-		legacy := s.cfg.LegacyCompatAuth && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Token")), []byte(s.cfg.ServiceSecret)) == 1
-		if !signed && !legacy {
+		service := strings.TrimSpace(r.Header.Get("X-Roost-Service"))
+		if service == "" {
+			service = "dslpha"
+		}
+		if !s.verifyService(service, r, body) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
+			return
+		}
+		if !serviceAllows(service, r.Method, r.URL.Path) {
+			writeError(w, http.StatusForbidden, "forbidden", "service scope does not allow this endpoint")
 			return
 		}
 		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
