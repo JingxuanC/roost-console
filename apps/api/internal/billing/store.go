@@ -251,6 +251,11 @@ func (s *Store) Billing(ctx context.Context, orgID string) (BillingView, error) 
 		}
 		return BillingView{}, err
 	}
+	effectivePlan, err := s.currentPlan(ctx, orgID, o.PlanCode)
+	if err != nil {
+		return BillingView{}, err
+	}
+	o.PlanCode = effectivePlan
 	plan, err := s.Plan(ctx, o.PlanCode)
 	if err != nil {
 		return BillingView{}, err
@@ -282,17 +287,65 @@ func (s *Store) Billing(ctx context.Context, orgID string) (BillingView, error) 
 	return BillingView{Org: o, Plan: plan, Wallet: w, Products: products}, rows.Err()
 }
 
+// currentPlan lazily expires a paid period. Credits are prepaid and stay in
+// the wallet; only the plan's product caps/validity are revoked.
+func (s *Store) currentPlan(ctx context.Context, orgID, planCode string) (string, error) {
+	if planCode == "free" || planCode == "" {
+		return "free", nil
+	}
+	var end time.Time
+	var status string
+	err := s.Pool.QueryRow(ctx, `select period_end,status from billing.subscriptions where org_id=$1`, orgID).Scan(&end, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "free", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if status == "active" && end.After(time.Now()) {
+		return planCode, nil
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `update public.organizations set plan_code='free',updated_at=now() where id=$1`, orgID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `update billing.subscriptions set status='expired',updated_at=now() where org_id=$1`, orgID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `delete from billing.entitlements where org_id=$1`, orgID); err != nil {
+		return "", err
+	}
+	if err := s.applyEntitlements(ctx, tx, orgID, "free"); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return "free", nil
+}
+
 func (s *Store) applyEntitlements(ctx context.Context, tx pgx.Tx, orgID, planCode string) error {
 	plan, err := s.PlanTx(ctx, tx, planCode)
 	if err != nil {
 		return err
 	}
+	var validUntil *time.Time
+	if planCode != "free" && plan.DurationDays > 0 {
+		var end time.Time
+		if err := tx.QueryRow(ctx, `select period_end from billing.subscriptions where org_id=$1`, orgID).Scan(&end); err == nil {
+			validUntil = &end
+		}
+	}
 	for product, capCredits := range plan.ProductCaps {
 		capValue := capCredits
 		if _, err := tx.Exec(ctx, `
-			insert into billing.entitlements (org_id,product,enabled,monthly_cap_credits)
-			values ($1,$2,true,$3)
-			on conflict (org_id,product) do update set enabled=true, monthly_cap_credits=excluded.monthly_cap_credits, updated_at=now()`, orgID, product, capValue); err != nil {
+			insert into billing.entitlements (org_id,product,enabled,monthly_cap_credits,valid_until)
+			values ($1,$2,true,$3,$4)
+			on conflict (org_id,product) do update set enabled=true, monthly_cap_credits=excluded.monthly_cap_credits, valid_until=excluded.valid_until, updated_at=now()`, orgID, product, capValue, validUntil); err != nil {
 			return err
 		}
 	}

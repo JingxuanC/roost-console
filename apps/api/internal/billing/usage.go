@@ -20,6 +20,14 @@ type Entitlement struct {
 }
 
 func (s *Store) Resolve(ctx context.Context, orgID, product string) (Entitlement, error) {
+	var storedPlan string
+	if err := s.Pool.QueryRow(ctx, `select plan_code from public.organizations where id=$1`, orgID).Scan(&storedPlan); err != nil {
+		return Entitlement{}, err
+	}
+	// Lazy-expire the paid period before reading caps; prepaid credits stay.
+	if _, err := s.currentPlan(ctx, orgID, storedPlan); err != nil {
+		return Entitlement{}, err
+	}
 	var e Entitlement
 	err := s.Pool.QueryRow(ctx, `
 		select o.id,o.plan_code,e.enabled,e.monthly_cap_credits,
