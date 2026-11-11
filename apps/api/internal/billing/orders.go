@@ -182,7 +182,7 @@ func (s *Store) ListOrders(ctx context.Context, orgID string, limit int) ([]Orde
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Order
+	out := make([]Order, 0)
 	for rows.Next() {
 		var o Order
 		if err := rows.Scan(&o.ID, &o.OrgID, &o.OutTradeNo, &o.SKU, &o.AmountCents, &o.Credits, &o.Status, &o.QRURL, &o.PayURL, &o.PaidAt, &o.CreatedAt); err != nil {

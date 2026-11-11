@@ -229,7 +229,7 @@ func (s *Store) Plans(ctx context.Context) ([]Plan, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Plan
+	out := make([]Plan, 0)
 	for rows.Next() {
 		var p Plan
 		var caps, features []byte
@@ -271,7 +271,7 @@ func (s *Store) Billing(ctx context.Context, orgID string) (BillingView, error) 
 		return BillingView{}, err
 	}
 	defer rows.Close()
-	var products []ProductState
+	products := make([]ProductState, 0)
 	for rows.Next() {
 		var p ProductState
 		if err := rows.Scan(&p.Product, &p.Enabled, &p.MonthlyCap, &p.UsedThisMonth); err != nil {

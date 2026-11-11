@@ -333,6 +333,7 @@ function OrderModal({ token, order, onClose, onPaid }: { token: string; order: O
 }
 
 function Orders({ orders }: { orders: Order[] }) {
+  orders = orders ?? [];
   return (
     <section className="section" id="orders">
       <div className="section__head">
