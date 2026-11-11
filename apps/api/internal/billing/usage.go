@@ -333,3 +333,46 @@ func (s *Store) ReleaseByRun(ctx context.Context, orgID, product, runRef string)
 	}
 	return tx.Commit(ctx)
 }
+
+// Charge directly debits usage without a reservation. It is used by a product
+// that meters after the fact (market lease periods), where a per-period lease
+// would be more machinery than value. ref is the idempotency key.
+func (s *Store) Charge(ctx context.Context, orgID, product, ref string, credits int64) (bool, error) {
+	if credits < 0 {
+		return false, errors.New("credits must be >= 0")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "wallet:"+orgID); err != nil {
+		return false, err
+	}
+	var balance int64
+	if err := tx.QueryRow(ctx, `select balance_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrNotFound
+		}
+		return false, err
+	}
+	var exists int
+	if err := tx.QueryRow(ctx, `select count(*) from billing.ledger where idempotency_key=$1`, "charge:"+ref).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists > 0 {
+		return true, tx.Commit(ctx)
+	}
+	if balance < credits {
+		return false, ErrInsufficientCredits
+	}
+	if credits > 0 {
+		if _, err := tx.Exec(ctx, `update billing.wallets set balance_credits=balance_credits-$2,version=version+1,updated_at=now() where org_id=$1`, orgID, credits); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(ctx, `insert into billing.ledger(org_id,product,delta_credits,reason,ref_id,idempotency_key) values ($1,$2,$3,'usage',$4,$5)`, orgID, product, -credits, ref, "charge:"+ref); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit(ctx)
+}
