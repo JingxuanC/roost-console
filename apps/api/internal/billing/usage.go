@@ -1,0 +1,192 @@
+package billing
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+type Entitlement struct {
+	OrgID        string `json:"org_id"`
+	Product      string `json:"product"`
+	Enabled      bool   `json:"enabled"`
+	PlanCode     string `json:"plan_code"`
+	MonthlyCap   *int64 `json:"monthly_cap_credits"`
+	Available    int64  `json:"available_credits"`
+	Balance      int64  `json:"balance_credits"`
+	Reserved     int64  `json:"reserved_credits"`
+}
+
+func (s *Store) Resolve(ctx context.Context, orgID, product string) (Entitlement, error) {
+	var e Entitlement
+	err := s.Pool.QueryRow(ctx, `
+		select o.id,o.plan_code,e.enabled,e.monthly_cap_credits,
+		       w.balance_credits,w.reserved_credits
+		from public.organizations o
+		join billing.wallets w on w.org_id=o.id
+		join billing.entitlements e on e.org_id=o.id and e.product=$2
+		where o.id=$1 and o.status='active'
+		  and (e.valid_until is null or e.valid_until > now())`,
+		orgID, product).Scan(&e.OrgID, &e.PlanCode, &e.Enabled, &e.MonthlyCap, &e.Balance, &e.Reserved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Entitlement{}, ErrProductNotEnabled
+	}
+	if err != nil {
+		return Entitlement{}, err
+	}
+	e.Product = product
+	e.Available = e.Balance - e.Reserved
+	return e, nil
+}
+
+func (s *Store) Reserve(ctx context.Context, orgID, product, runRef string, estimated int64, ttl time.Duration) (Lease, error) {
+	if estimated < 0 {
+		return Lease{}, errors.New("estimated credits must be >= 0")
+	}
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Lease{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "wallet:"+orgID); err != nil {
+		return Lease{}, err
+	}
+	var planCode string
+	var enabled bool
+	var capCredits *int64
+	if err := tx.QueryRow(ctx, `
+		select o.plan_code,e.enabled,e.monthly_cap_credits
+		from public.organizations o
+		join billing.entitlements e on e.org_id=o.id and e.product=$2
+		where o.id=$1 and o.status='active' and (e.valid_until is null or e.valid_until > now())`,
+		orgID, product).Scan(&planCode, &enabled, &capCredits); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Lease{}, ErrProductNotEnabled
+		}
+		return Lease{}, err
+	}
+	if !enabled {
+		return Lease{}, ErrProductNotEnabled
+	}
+	if capCredits != nil {
+		var used int64
+		if err := tx.QueryRow(ctx, `
+			select coalesce(-sum(delta_credits),0) from billing.ledger
+			where org_id=$1 and product=$2 and delta_credits < 0
+			  and created_at >= date_trunc('month', now())`, orgID, product).Scan(&used); err != nil {
+			return Lease{}, err
+		}
+		if used+estimated > *capCredits {
+			return Lease{}, ErrProductCap
+		}
+	}
+	var balance, reserved int64
+	if err := tx.QueryRow(ctx, `select balance_credits,reserved_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance, &reserved); err != nil {
+		return Lease{}, err
+	}
+	// A retry of the same run must not reserve twice.
+	var existing Lease
+	err = tx.QueryRow(ctx, `select id,org_id,product,run_ref,reserved_credits,status,expires_at from billing.usage_leases where org_id=$1 and product=$2 and run_ref=$3 and status='active' for update`, orgID, product, runRef).Scan(&existing.ID, &existing.OrgID, &existing.Product, &existing.RunRef, &existing.ReservedCredits, &existing.Status, &existing.ExpiresAt)
+	if err == nil {
+		return existing, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Lease{}, err
+	}
+	if balance-reserved < estimated {
+		return Lease{}, ErrInsufficientCredits
+	}
+	var l Lease
+	err = tx.QueryRow(ctx, `
+		insert into billing.usage_leases (org_id,product,run_ref,reserved_credits,expires_at)
+		values ($1,$2,$3,$4,now()+make_interval(secs=>$5))
+		on conflict (org_id,product,run_ref) do update set
+			reserved_credits=excluded.reserved_credits,expires_at=excluded.expires_at
+		where billing.usage_leases.status='active'
+		returning id,org_id,product,run_ref,reserved_credits,status,expires_at`,
+		orgID, product, runRef, estimated, int(ttl.Seconds())).Scan(&l.ID, &l.OrgID, &l.Product, &l.RunRef, &l.ReservedCredits, &l.Status, &l.ExpiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Lease{}, errors.New("run_ref already settled")
+		}
+		return Lease{}, err
+	}
+	if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=reserved_credits+$2,version=version+1,updated_at=now() where org_id=$1`, orgID, estimated); err != nil {
+		return Lease{}, err
+	}
+	return l, tx.Commit(ctx)
+}
+
+func (s *Store) Settle(ctx context.Context, leaseID string, actual int64) (Lease, error) {
+	if actual < 0 {
+		return Lease{}, errors.New("actual credits must be >= 0")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return Lease{}, err
+	}
+	defer tx.Rollback(ctx)
+	var l Lease
+	if err := tx.QueryRow(ctx, `select id,org_id,product,run_ref,reserved_credits,status,expires_at from billing.usage_leases where id=$1 for update`, leaseID).Scan(&l.ID, &l.OrgID, &l.Product, &l.RunRef, &l.ReservedCredits, &l.Status, &l.ExpiresAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Lease{}, ErrNotFound
+		}
+		return Lease{}, err
+	}
+	if l.Status != "active" {
+		return l, nil
+	}
+	var balance, reserved int64
+	if err := tx.QueryRow(ctx, `select balance_credits,reserved_credits from billing.wallets where org_id=$1 for update`, l.OrgID).Scan(&balance, &reserved); err != nil {
+		return Lease{}, err
+	}
+	extra := actual - l.ReservedCredits
+	if extra > 0 {
+		if balance-reserved < extra {
+			return Lease{}, ErrInsufficientCredits
+		}
+	}
+	if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=greatest(0,reserved_credits-$2),balance_credits=greatest(0,balance_credits-$3),version=version+1,updated_at=now() where org_id=$1`, l.OrgID, l.ReservedCredits, actual); err != nil {
+		return Lease{}, err
+	}
+	if actual > 0 {
+		if _, err := tx.Exec(ctx, `insert into billing.ledger (org_id,product,delta_credits,reason,ref_id,idempotency_key) values ($1,$2,$3,'usage',$4,$5) on conflict (idempotency_key) do nothing`, l.OrgID, l.Product, -actual, leaseID, "lease:"+leaseID); err != nil {
+			return Lease{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `update billing.usage_leases set status='settled',settled_credits=$2 where id=$1`, leaseID, actual); err != nil {
+		return Lease{}, err
+	}
+	l.Status = "settled"
+	l.ReservedCredits = 0
+	return l, tx.Commit(ctx)
+}
+
+func (s *Store) Release(ctx context.Context, leaseID string) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var orgID string
+	var reserved int64
+	var status string
+	if err := tx.QueryRow(ctx, `select org_id,reserved_credits,status from billing.usage_leases where id=$1 for update`, leaseID).Scan(&orgID, &reserved, &status); err != nil {
+		return err
+	}
+	if status != "active" {
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=greatest(0,reserved_credits-$2),version=version+1,updated_at=now() where org_id=$1`, orgID, reserved); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update billing.usage_leases set status='released' where id=$1`, leaseID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

@@ -1,0 +1,12 @@
+# local secrets
+.env
+.env.local
+.env.*.local
+apps/**/.env.local
+# build output
+bin/
+apps/web/dist/
+apps/web/node_modules/
+apps/web/*.tsbuildinfo
+# go
+apps/api/roost-console
