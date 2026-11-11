@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/usage/leases", s.withService(s.reserve))
 	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/settle", s.withService(s.settleByRun))
 	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/release", s.withService(s.releaseByRun))
+	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/draw", s.withService(s.drawByRun))
 	mux.HandleFunc("POST /internal/v1/usage/charge", s.withService(s.charge))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/settle", s.withService(s.settle))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/release", s.withService(s.release))
@@ -706,6 +707,26 @@ func (s *Server) settleByRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"settled": found})
+}
+
+func (s *Server) drawByRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OrgID string `json:"org_id"`
+		Product string `json:"product"`
+		RunRef string `json:"run_ref"`
+		Ref string `json:"ref"`
+		Credits int64 `json:"credits"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrgID == "" || req.Product == "" || req.RunRef == "" || req.Ref == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "org_id, product, run_ref and ref are required")
+		return
+	}
+	ok, err := s.store.DrawByRun(r.Context(), req.OrgID, req.Product, req.RunRef, req.Ref, req.Credits)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"drawn": ok})
 }
 
 func (s *Server) releaseByRun(w http.ResponseWriter, r *http.Request) {
