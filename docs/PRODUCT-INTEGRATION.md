@@ -55,7 +55,7 @@ POST /internal/v1/usage/leases/{lease_id}/release
 | 产品 | product key | 计量 |
 |---|---|---|
 | dslpha | `dsalpha` | 模型 token、沙箱秒、工具调用折算 credits |
-| roostbot | `roostbot` | token、容器秒、工具调用 |
+| causal-memory | `causal-memory` | 记忆读写/推理用量 |
 | market | `market` | 沙箱秒、节点资源 |
 
 所有产品只使用一个钱包；产品侧只保留操作配额（例如每回合上限），不再保存人民币余额。
@@ -68,13 +68,13 @@ POST /internal/v1/usage/leases/{lease_id}/release
 - 旧 `quota-service` 钱包不再作为余额来源
 - 升级按钮指向 `https://www.roostbots.com/console/`
 
-## 5. roostbot 最小改造
+## 5. causal-memory 最小改造（替代暂停的 roostbot）
 
-- account/session 表不再作为登录事实源
-- 使用同一个 Supabase JWT
+- 使用 Roost OIDC 或同一 Supabase JWT
+- 只保留 causal-memory 自己的用量计量
 - `workspaces.tenant_id` 使用 `org_id`
 - 预算层保留为操作配额；实际扣费调用 Roost
-- “用量与预算”页显示 Roost 余额链接
+- 控制台显示 Roost 余额链接
 
 ## 6. market 最小改造
 

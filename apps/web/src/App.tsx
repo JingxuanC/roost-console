@@ -5,8 +5,8 @@ import { api, type BillingView, type MeResponse, type Order, type Plan } from '.
 
 const PRODUCT_LABELS: Record<string, string> = {
   dslpha: 'DeepSeek Alpha · 投研工作台',
-  roostbot: 'Roost Bot · 云端 Bot 团队',
   market: 'Roost Market · 算力市场',
+  'causal-memory': 'Causal Memory · 智能体记忆',
 };
 
 const CREDIT_PACKS = [
@@ -79,7 +79,7 @@ function AuthScreen() {
           <p className="eyebrow"><span className="dot" /> ONE ORGANIZATION</p>
           <h1>一个账号，<br /><span>四个产品。</span></h1>
           <p className="auth__lead">
-            Roost 组织统一账号、积分和账单。注册之后，dsalpha、roostbot、market
+            Roost 组织统一账号、积分和账单。注册之后，dsalpha、market、causal-memory
             共用同一份余额，不用再分别充值。
           </p>
           <div className="auth__ledger">
@@ -88,7 +88,7 @@ function AuthScreen() {
               <span className="tag tag--live">active</span>
             </div>
             <div className="auth__ledger-row"><span>余额</span><strong>12,480 credits</strong></div>
-            <div className="auth__ledger-row"><span>产品</span><span>dsalpha · roostbot · market</span></div>
+            <div className="auth__ledger-row"><span>产品</span><span>dsalpha · market · causal-memory</span></div>
             <div className="auth__ledger-row"><span>账单</span><span>一个组织，一份账单</span></div>
           </div>
         </div>
@@ -475,7 +475,7 @@ function Console({ session }: { session: Session }) {
             <p className="kicker">ORGANIZATION</p>
             <h1>{me.org.name}</h1>
           </div>
-          <p className="page__intro-note">一个组织 ID，贯穿 dslpha、roostbot 与 market。积分实时共享。</p>
+          <p className="page__intro-note">一个组织 ID，贯穿 dslpha、market 与 causal-memory。积分实时共享。</p>
         </div>
         {error && <p className="form-error">{error}</p>}
         <WalletCard billing={me.billing} />
