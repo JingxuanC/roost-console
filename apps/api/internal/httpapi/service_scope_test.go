@@ -1,6 +1,10 @@
 package httpapi
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestServiceScopes(t *testing.T) {
 	cases := []struct {
@@ -26,5 +30,21 @@ func TestServiceScopes(t *testing.T) {
 		if got := serviceAllows(c.service, c.method, c.path); got != c.want {
 			t.Errorf("serviceAllows(%q,%q)=%v want %v", c.service, c.path, got, c.want)
 		}
+	}
+}
+
+func TestRateLimitMiddleware(t *testing.T) {
+	s := &Server{}
+	h := s.rateLimit("test", 2, ipKey, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	codes := []int{}
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "http://example/oauth/token", nil)
+		req.RemoteAddr = "203.0.113.7:1234"
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		codes = append(codes, rec.Code)
+	}
+	if codes[0] != 200 || codes[1] != 200 || codes[2] != 429 {
+		t.Fatalf("codes %v", codes)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/config"
 	"github.com/JingxuanC/roost-console/apps/api/internal/oidc"
 	"github.com/JingxuanC/roost-console/apps/api/internal/payment"
+	"github.com/JingxuanC/roost-console/apps/api/internal/ratelimit"
 )
 
 var sCausalMCPURL = strings.TrimSpace(getenvDefault("CAUSAL_MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp"))
@@ -60,18 +62,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /v1/me", s.withUser(s.me))
 	mux.HandleFunc("GET /v1/billing/plans", s.withUser(s.plans))
-	mux.HandleFunc("POST /v1/orgs/{orgID}/products/{product}/token", s.withUser(s.issueProductToken))
+	mux.HandleFunc("POST /v1/orgs/{orgID}/products/{product}/token", s.withUser(s.rateLimit("product_token", s.cfg.RateProductToken, s.userKey, s.issueProductToken)))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/products/{product}/tokens", s.withUser(s.listProductTokens))
 	mux.HandleFunc("POST /internal/v1/products/{product}/tokens", s.withService(s.internalProductTokens))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/billing", s.withUser(s.billingView))
 	mux.HandleFunc("GET /v1/billing/orders", s.withUser(s.listOrders))
 	mux.HandleFunc("POST /v1/billing/orders", s.withUser(s.createOrder))
 	mux.HandleFunc("GET /v1/billing/orders/{orderID}", s.withUser(s.getOrder))
-	mux.HandleFunc("POST /v1/payments/xunhupay/notify", s.xunhuNotify)
+	mux.HandleFunc("POST /v1/payments/xunhupay/notify", s.rateLimit("payment_notify", s.cfg.RatePaymentNotify, ipKey, s.xunhuNotify))
 	mux.HandleFunc("POST /v1/dev/orders/{orderID}/pay", s.withUser(s.devPay))
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.oidcDiscovery)
 	mux.HandleFunc("GET /oauth/authorize", s.oidcAuthorizeRedirect)
-	mux.HandleFunc("POST /oauth/token", s.oidcToken)
+	mux.HandleFunc("POST /oauth/token", s.rateLimit("oidc_token", s.cfg.RateOIDCToken, ipKey, s.oidcToken))
 	mux.HandleFunc("GET /oauth/userinfo", s.oidcUserinfo)
 	mux.HandleFunc("GET /oauth/jwks.json", s.oidcJWKS)
 	mux.HandleFunc("POST /v1/oauth/authorize", s.withUser(s.oidcApprove))
@@ -112,6 +114,37 @@ func (s *Server) cors(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) rateLimit(name string, perMinute int, key func(*http.Request) string, next http.HandlerFunc) http.HandlerFunc {
+	limiter := ratelimit.New(perMinute, time.Minute)
+	return func(w http.ResponseWriter, r *http.Request) {
+		ok, wait := limiter.Allow(key(r), time.Now())
+		if !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "rate_limited", name+" rate limit exceeded")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func ipKey(r *http.Request) string {
+	if v := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); v != "" {
+		return v
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func (s *Server) userKey(r *http.Request) string {
+	if u := userFrom(r); u != nil {
+		return "user:" + u.ID
+	}
+	return "ip:" + ipKey(r)
 }
 
 func (s *Server) withUser(next http.HandlerFunc) http.HandlerFunc {

@@ -39,7 +39,7 @@
 |---|---|---|---|
 | SEC-01 | High | 内部服务使用静态共享 Bearer token | 已修复：per-service secret + scope + 轮换 |
 | SEC-02 | High | OIDC 单 client secret 被多产品共用，token endpoint 无限流 | 待修 |
-| SEC-03 | High | 登录、支付回调、token 签发、MCP 调用缺少统一限流 | 部分修复：Nginx 已加 API/auth/MCP 限流 |
+| SEC-03 | High | 登录、支付回调、token 签发、MCP 调用缺少统一限流 | 已修复：Nginx + 应用层独立限流 |
 | SEC-04 | Medium | causal token 无每组织上限/撤销界面，sync 暴露全部 token hash | 待修 |
 | SEC-05 | Medium | 生产仍有测试账号、测试 causal token 和演示数据 | 待清理 |
 | SEC-06 | Medium | roostbot 已隐藏入口但 API 仍公开可达 | 已修复：service 停止，API 返回 404 |
@@ -103,15 +103,31 @@ root        仅运维
 
 建议：建立 OIDC client registry；market/roostbot 不同 client id/secret；token endpoint 加限流；定期轮换。
 
-### SEC-03 限流
+### SEC-03 限流（已修复核心端点）
 
-**本轮进展：** Nginx 已加：
+Nginx 已加：
 
 - `/console-api/`：20 r/s，burst 40
 - `/console-sb/`：5 r/s，burst 20
 - causal `/memory/`：10 r/s，burst 20
 
-**仍未完成：** 支付 notify、OIDC token、token 签发没有独立应用层 bucket；causal 没有 per-org QPS。
+应用层独立限流：
+
+| 端点 | key | 默认 |
+|---|---|---|
+| `/v1/payments/xunhupay/notify` | 来源 IP | 120/min |
+| `/oauth/token` | 来源 IP | 60/min |
+| `/v1/orgs/{org}/products/{product}/token` | 用户 | 5/min |
+
+超限返回 `429` 和 `Retry-After`。实测：
+
+```text
+payment notify  120 × 400 + 10 × 429
+OIDC token       60 × 401 +  5 × 429
+product token     5 × 201 +  1 × 429
+```
+
+causal 仍有 Nginx 10 r/s；per-org QPS 应用层可以后续再加。
 
 影响：暴力破解、token 猜测、MCP 调用刷量、支付回调洪水、资源耗尽。
 
@@ -265,8 +281,8 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains
 P0（发布前）：
 
 1. SEC-05：删除测试账号、测试 causal token、演示组织。
-2. SEC-03：支付/OIDC/token 签发单独限流（Nginx 基础限流已加）。
-3. SEC-06：已停止 roost-api，定期确认服务未被重新启用。
+2. SEC-06：已停止 roost-api，定期确认服务未被重新启用。
+3. causal per-org QPS 和支付对账。
 
 P1：
 
@@ -280,6 +296,14 @@ P2：
 
 10. SEC-07：DB 角色/RLS 纵深。
 11. SEC-11/12/13/14/15/16：key 生命周期、CORS、dev 路由移除、CSP、storage 降级、token 审计。
+
+## 7.2 应用层限流实现
+
+- `internal/ratelimit`：固定窗口 limiter。
+- 付款回调按 `X-Forwarded-For`/远端 IP。
+- OIDC token 按来源 IP。
+- 产品 token 按已认证 user。
+- 可通过 `RATE_PAYMENT_NOTIFY_PER_MIN`、`RATE_OIDC_TOKEN_PER_MIN`、`RATE_PRODUCT_TOKEN_PER_MIN` 调整。
 
 ## 8.1 仍需完成（P2）
 
