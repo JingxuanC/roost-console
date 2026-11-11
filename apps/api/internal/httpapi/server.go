@@ -49,6 +49,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/billing/orders/{orderID}", s.withUser(s.getOrder))
 	mux.HandleFunc("POST /v1/payments/xunhupay/notify", s.xunhuNotify)
 	mux.HandleFunc("POST /v1/dev/orders/{orderID}/pay", s.withUser(s.devPay))
+	mux.HandleFunc("POST /internal/v1/orgs/resolve-user", s.withService(s.resolveUserOrg))
 	mux.HandleFunc("POST /internal/v1/entitlements/resolve", s.withService(s.resolveEntitlement))
 	mux.HandleFunc("POST /internal/v1/usage/leases", s.withService(s.reserve))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/settle", s.withService(s.settle))
@@ -330,6 +331,22 @@ type leaseRequest struct {
 	RunRef            string `json:"run_ref"`
 	EstimatedCredits  int64  `json:"estimated_credits"`
 	TTLSeconds        int    `json:"ttl_seconds"`
+}
+
+func (s *Server) resolveUserOrg(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "user_id is required")
+		return
+	}
+	org, err := s.store.OrgForUser(r.Context(), req.UserID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, org)
 }
 
 func (s *Server) resolveEntitlement(w http.ResponseWriter, r *http.Request) {

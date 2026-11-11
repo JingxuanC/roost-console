@@ -313,3 +313,7 @@ func (s *Store) PlanTx(ctx context.Context, tx pgx.Tx, code string) (Plan, error
 	_ = jsonUnmarshal(features, &p.Features)
 	return p, nil
 }
+
+func (s *Store) OrgForUser(ctx context.Context, userID string) (Org, error) {
+	return s.orgForUser(ctx, userID)
+}
