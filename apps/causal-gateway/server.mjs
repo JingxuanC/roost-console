@@ -11,6 +11,27 @@ const CONSOLE_URL = (process.env.ROOST_CONSOLE_API_URL || 'https://www.roostbots
 const SERVICE_SECRET = process.env.ROOST_SERVICE_SECRET || '';
 const CREDITS_PER_CALL = Number(process.env.CAUSAL_CREDITS_PER_CALL || 1);
 const SERVICE_NAME = process.env.ROOST_SERVICE_NAME || 'causal';
+const ORG_QPS = Number(process.env.CAUSAL_QPS_PER_ORG || 5);
+
+// Fixed one-second window per organization. The gateway is single-process on
+// the causal-memory host; if it is ever scaled out this needs a shared store.
+const orgWindows = new Map();
+function allowOrg(orgId, now = Date.now()) {
+  if (!Number.isFinite(ORG_QPS) || ORG_QPS <= 0) return true;
+  const w = orgWindows.get(orgId);
+  if (!w || now - w.start >= 1000) {
+    orgWindows.set(orgId, { start: now, count: 1 });
+    if (orgWindows.size > 10000) {
+      for (const [key, value] of orgWindows) {
+        if (now - value.start >= 1000) orgWindows.delete(key);
+      }
+    }
+    return true;
+  }
+  if (w.count >= ORG_QPS) return false;
+  w.count += 1;
+  return true;
+}
 
 function signedHeaders(method, path, body) {
   const ts = String(Math.floor(Date.now() / 1000));
@@ -61,6 +82,10 @@ const server = http.createServer(async (req, res) => {
   if (!token) return json(res, 401, { error: 'missing bearer token' });
   const orgId = tokenMap()['sha256:' + sha256(token)];
   if (!orgId) return json(res, 401, { error: 'unknown bearer token' });
+  if (!allowOrg(orgId)) {
+    res.setHeader('Retry-After', '1');
+    return json(res, 429, { error: 'organization rate limit exceeded' });
+  }
 
   const isCall = req.method === 'POST' && (req.url === '/mcp' || req.url.startsWith('/mcp?'));
   if (isCall && CREDITS_PER_CALL > 0) {
