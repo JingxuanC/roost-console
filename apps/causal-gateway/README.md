@@ -11,3 +11,15 @@ Sits in front of causal-memory's `/mcp` on the causal-memory host.
 
 The token file is written by `cm-token-sync` from the Roost Console internal
 token endpoint.
+
+
+## Host install
+
+```bash
+install -m 700 token-sync.py /opt/mcp-suite/causal-memory/token-sync/sync.py
+install -m 600 <service-secret> /etc/causal-token-sync.secret
+systemctl enable --now cm-token-sync.timer cm-gateway cm-storage-meter.timer
+```
+
+Nginx routes `/memory/` to `127.0.0.1:50062` (the gateway), which proxies to
+`127.0.0.1:50061` (causal-memory).
