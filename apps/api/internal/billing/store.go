@@ -317,3 +317,9 @@ func (s *Store) PlanTx(ctx context.Context, tx pgx.Tx, code string) (Plan, error
 func (s *Store) OrgForUser(ctx context.Context, userID string) (Org, error) {
 	return s.orgForUser(ctx, userID)
 }
+
+func (s *Store) EnsureOrgByUserID(ctx context.Context, userID string) (Org, error) {
+	// Product bridges only have the Supabase principal id. Do not read auth.users
+	// from the billing role; a personal org is enough to start the relationship.
+	return s.EnsureOrg(ctx, userID, userID+"@roost.local")
+}

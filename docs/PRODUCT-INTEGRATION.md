@@ -89,3 +89,29 @@ POST /internal/v1/usage/leases/{lease_id}/release
 - **mid-turn renewal**：可按产品策略 fail open，并在恢复后结算
 - 所有产品必须设置超时，禁止无限等待
 - 回调入账只认控制面，产品不得自行加积分
+
+## 8. dslpha compatibility bridge (implemented)
+
+dslpha can point its existing quota-service client at Roost Console without
+changing its lease code:
+
+```bash
+AUTH_SERVICE_URL=https://www.roostbots.com/console-api
+INTERNAL_SERVICE_TOKEN=<SERVICE_SECRET>
+USD_TO_CREDITS_RATE=720
+```
+
+Roost exposes the legacy paths under `/api/auth/...`, including
+`/api/auth/billing/leases/capability`. On release dslpha reads the run's
+last heartbeat (`in_flight_credits`) and sends `spent_credits`; Roost settles
+the organization wallet exactly once. The change lives in
+`LangAlpha` branch `feat/roost-billing` and its
+`docs/roost-billing.md`.
+
+Tested against the deployed control plane:
+
+```text
+validate  -> 200, plan and remaining credits
+acquire   -> 200, granted=true, ceiling_credits
+release   -> 200, lease settled at actual spend
+```

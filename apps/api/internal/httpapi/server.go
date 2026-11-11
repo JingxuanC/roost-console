@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -49,6 +50,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/billing/orders/{orderID}", s.withUser(s.getOrder))
 	mux.HandleFunc("POST /v1/payments/xunhupay/notify", s.xunhuNotify)
 	mux.HandleFunc("POST /v1/dev/orders/{orderID}/pay", s.withUser(s.devPay))
+	mux.HandleFunc("GET /api/auth/billing/leases/capability", s.withCompatService(s.compatCapability))
+	mux.HandleFunc("POST /api/auth/validate", s.withCompatService(s.compatValidate))
+	mux.HandleFunc("POST /api/auth/billing/leases/acquire", s.withCompatService(s.compatAcquire))
+	mux.HandleFunc("POST /api/auth/billing/leases/release", s.withCompatService(s.compatRelease))
 	mux.HandleFunc("POST /internal/v1/orgs/resolve-user", s.withService(s.resolveUserOrg))
 	mux.HandleFunc("POST /internal/v1/entitlements/resolve", s.withService(s.resolveEntitlement))
 	mux.HandleFunc("POST /internal/v1/usage/leases", s.withService(s.reserve))
@@ -331,6 +336,134 @@ type leaseRequest struct {
 	RunRef            string `json:"run_ref"`
 	EstimatedCredits  int64  `json:"estimated_credits"`
 	TTLSeconds        int    `json:"ttl_seconds"`
+}
+
+func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Service-Token")), []byte(s.cfg.ServiceSecret)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service token")
+			return
+		}
+		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
+		if userID == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "X-User-Id is required")
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), userKey, &auth.User{ID: userID})))
+	}
+}
+
+func (s *Server) compatCapability(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": true, "lease_ttl_seconds": 300,
+		"rate_multiplier_min": 0.1, "rate_multiplier_max": 100.0,
+	})
+}
+
+func accessTier(code string) int {
+	switch code {
+	case "max":
+		return 3
+	case "pro", "byok-pro":
+		return 2
+	case "starter":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (s *Server) compatValidate(w http.ResponseWriter, r *http.Request) {
+	userID := userFrom(r).ID
+	org, err := s.store.EnsureOrgByUserID(r.Context(), userID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	e, err := s.store.Resolve(r.Context(), org.ID, "dsalpha")
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"access_tier": -1, "plan_display_name": "", "scopes": []string{}, "quota": map[string]any{"allowed": false, "limit_type": "plan", "message": "Roost 组织未开通投研产品"}})
+		return
+	}
+	var req struct {
+		CheckQuota string `json:"check_quota"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	allowed := e.Available > 0
+	limitType := "credit_limit"
+	if req.CheckQuota == "computer_count" || req.CheckQuota == "workspace" {
+		allowed = true
+		limitType = "workspace_limit"
+	}
+	quota := map[string]any{
+		"allowed": allowed, "limit_type": limitType,
+		"used_credits": e.Balance - e.Available, "credit_limit": e.Balance,
+		"remaining_credits": e.Available, "message": "Roost 积分不足，请充值",
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_tier": accessTier(e.PlanCode), "plan_display_name": e.PlanCode,
+		"scopes": []string{}, "quota": quota,
+	})
+}
+
+func (s *Server) compatAcquire(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID       string  `json:"user_id"`
+		RunRef       string  `json:"run_ref"`
+		SpentCredits float64 `json:"spent_credits"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RunRef == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "run_ref is required")
+		return
+	}
+	org, err := s.store.EnsureOrgByUserID(r.Context(), req.UserID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	estimate := int64(math.Ceil(math.Max(200, req.SpentCredits*2+200)))
+	lease, err := s.store.Reserve(r.Context(), org.ID, "dsalpha", req.RunRef, estimate, 300*time.Second)
+	if err != nil {
+		if errors.Is(err, billing.ErrInsufficientCredits) || errors.Is(err, billing.ErrProductCap) || errors.Is(err, billing.ErrProductNotEnabled) {
+			writeJSON(w, http.StatusOK, map[string]any{"granted": false, "quota": map[string]any{"allowed": false, "message": "Roost 积分不足，请充值", "limit_type": "credit_limit"}})
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"granted": true, "ceiling_credits": lease.ReservedCredits,
+		"expires_in_seconds": 300, "generation": 1,
+		"quota": map[string]any{"allowed": true},
+	})
+}
+
+func (s *Server) compatRelease(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID       string  `json:"user_id"`
+		RunRef       string  `json:"run_ref"`
+		SpentCredits float64 `json:"spent_credits"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RunRef == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "run_ref is required")
+		return
+	}
+	org, err := s.store.EnsureOrgByUserID(r.Context(), req.UserID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	actual := int64(math.Ceil(math.Max(0, req.SpentCredits)))
+	if actual > 0 {
+		_, err = s.store.SettleByRun(r.Context(), org.ID, "dsalpha", req.RunRef, actual)
+	} else {
+		err = s.store.ReleaseByRun(r.Context(), org.ID, "dsalpha", req.RunRef)
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"released": true})
 }
 
 func (s *Server) resolveUserOrg(w http.ResponseWriter, r *http.Request) {

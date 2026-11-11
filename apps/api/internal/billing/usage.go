@@ -89,10 +89,26 @@ func (s *Store) Reserve(ctx context.Context, orgID, product, runRef string, esti
 	if err := tx.QueryRow(ctx, `select balance_credits,reserved_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance, &reserved); err != nil {
 		return Lease{}, err
 	}
-	// A retry of the same run must not reserve twice.
+	// A retry of the same run must not reserve twice; it may only extend the
+	// existing reservation when the caller asks for a larger ceiling.
 	var existing Lease
 	err = tx.QueryRow(ctx, `select id,org_id,product,run_ref,reserved_credits,status,expires_at from billing.usage_leases where org_id=$1 and product=$2 and run_ref=$3 and status='active' for update`, orgID, product, runRef).Scan(&existing.ID, &existing.OrgID, &existing.Product, &existing.RunRef, &existing.ReservedCredits, &existing.Status, &existing.ExpiresAt)
 	if err == nil {
+		if estimated <= existing.ReservedCredits {
+			return existing, tx.Commit(ctx)
+		}
+		delta := estimated - existing.ReservedCredits
+		if balance-reserved < delta {
+			return Lease{}, ErrInsufficientCredits
+		}
+		if _, err := tx.Exec(ctx, `update billing.usage_leases set reserved_credits=$2,expires_at=now()+make_interval(secs=>$3) where id=$1`, existing.ID, estimated, int(ttl.Seconds())); err != nil {
+			return Lease{}, err
+		}
+		if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=reserved_credits+$2,version=version+1,updated_at=now() where org_id=$1`, orgID, delta); err != nil {
+			return Lease{}, err
+		}
+		existing.ReservedCredits = estimated
+		existing.ExpiresAt = time.Now().Add(ttl)
 		return existing, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -237,4 +253,75 @@ func (s *Store) ExpireLeases(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return len(list), nil
+}
+
+// SettleByRun settles the active lease for a run ref. dslpha's compatibility
+// bridge only knows (user, run_ref), not the lease UUID, so this is the path it
+// uses when a turn ends. actual is the turn's measured spend.
+func (s *Store) SettleByRun(ctx context.Context, orgID, product, runRef string, actual int64) (bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var id string
+	var reserved int64
+	if err := tx.QueryRow(ctx, `
+		select id,reserved_credits from billing.usage_leases
+		where org_id=$1 and product=$2 and run_ref=$3 and status='active'
+		for update`, orgID, product, runRef).Scan(&id, &reserved); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	var balance int64
+	if err := tx.QueryRow(ctx, `select balance_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance); err != nil {
+		return false, err
+	}
+	if actual > balance {
+		actual = balance
+	}
+	if _, err := tx.Exec(ctx, `
+		update billing.wallets set balance_credits=greatest(0,balance_credits-$2),
+			reserved_credits=greatest(0,reserved_credits-$3),version=version+1,updated_at=now()
+		where org_id=$1`, orgID, actual, reserved); err != nil {
+		return false, err
+	}
+	if actual > 0 {
+		if _, err := tx.Exec(ctx, `
+			insert into billing.ledger(org_id,product,delta_credits,reason,ref_id,idempotency_key)
+			values ($1,$2,$3,'usage',$4,$5)
+			on conflict (idempotency_key) do nothing`, orgID, product, -actual, id, "lease:"+id); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `update billing.usage_leases set status='settled',settled_credits=$2 where id=$1`, id, actual); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// ReleaseByRun releases an active lease without charging it.
+func (s *Store) ReleaseByRun(ctx context.Context, orgID, product, runRef string) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var id string
+	var reserved int64
+	if err := tx.QueryRow(ctx, `select id,reserved_credits from billing.usage_leases where org_id=$1 and product=$2 and run_ref=$3 and status='active' for update`, orgID, product, runRef).Scan(&id, &reserved); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=greatest(0,reserved_credits-$2),version=version+1,updated_at=now() where org_id=$1`, orgID, reserved); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update billing.usage_leases set status='released' where id=$1`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
