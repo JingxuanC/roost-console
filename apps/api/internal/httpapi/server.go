@@ -63,6 +63,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/orgs/resolve-user", s.withService(s.resolveUserOrg))
 	mux.HandleFunc("POST /internal/v1/entitlements/resolve", s.withService(s.resolveEntitlement))
 	mux.HandleFunc("POST /internal/v1/usage/leases", s.withService(s.reserve))
+	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/settle", s.withService(s.settleByRun))
+	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/release", s.withService(s.releaseByRun))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/settle", s.withService(s.settle))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/release", s.withService(s.release))
 	return s.cors(mux)
@@ -649,6 +651,42 @@ func (s *Server) settle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, l)
+}
+
+func (s *Server) settleByRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OrgID   string `json:"org_id"`
+		Product string `json:"product"`
+		RunRef  string `json:"run_ref"`
+		ActualCredits int64 `json:"actual_credits"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrgID == "" || req.Product == "" || req.RunRef == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "org_id, product and run_ref are required")
+		return
+	}
+	found, err := s.store.SettleByRun(r.Context(), req.OrgID, req.Product, req.RunRef, req.ActualCredits)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"settled": found})
+}
+
+func (s *Server) releaseByRun(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OrgID   string `json:"org_id"`
+		Product string `json:"product"`
+		RunRef  string `json:"run_ref"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrgID == "" || req.Product == "" || req.RunRef == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "org_id, product and run_ref are required")
+		return
+	}
+	if err := s.store.ReleaseByRun(r.Context(), req.OrgID, req.Product, req.RunRef); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"released": true})
 }
 
 func (s *Server) release(w http.ResponseWriter, r *http.Request) {
