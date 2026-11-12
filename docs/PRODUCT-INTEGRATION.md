@@ -75,6 +75,10 @@ POST /internal/v1/usage/leases/{lease_id}/release
 - `workspaces.tenant_id` 使用 `org_id`
 - 预算层保留为操作配额；实际扣费调用 Roost
 - 控制台显示 Roost 余额链接
+- CLI/桌面接入与记忆 token 生命周期见 [CLI.md](CLI.md)：
+  `GET /v1/cli/config`（公开引导配置）、
+  `DELETE /v1/orgs/{orgID}/products/causal-memory/tokens/{tokenHash}`（撤销），
+  列表返回 `last_used_at`
 
 ## 6. market 最小改造
 
