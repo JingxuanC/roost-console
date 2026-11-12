@@ -2,7 +2,8 @@
 
 统一 Roost 组织、积分、套餐、支付与产品权限的控制面。
 
-状态：Phase 1–3 已上线（2026-11-12）。设计文档见 [docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)。
+状态：Phase 1–3 已上线（2026-11-12）。设计文档见 [docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)；
+CLI 引导配置与记忆 token 撤销见 [docs/CLI.md](docs/CLI.md)。
 
 生产控制台：`https://www.roostbots.com/console/`
 

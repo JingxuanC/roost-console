@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -25,16 +24,18 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/ratelimit"
 )
 
-var sCausalMCPURL = strings.TrimSpace(getenvDefault("CAUSAL_MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp"))
-
-func getenvDefault(k, d string) string {
-	if v := strings.TrimSpace(getenv(k)); v != "" {
-		return v
-	}
-	return d
+// orgMembership is the authorization slice of the billing store used by
+// requireOrg. It is an interface so handler tests do not need Postgres.
+type orgMembership interface {
+	Membership(ctx context.Context, orgID, userID string) (string, error)
 }
 
-func getenv(k string) string { return os.Getenv(k) }
+// productTokenAdmin is the slice of the billing store used by the
+// causal-memory product-token endpoints.
+type productTokenAdmin interface {
+	ListProductTokens(ctx context.Context, orgID, product string) ([]billing.ProductToken, error)
+	RevokeProductToken(ctx context.Context, orgID, product, tokenHash string) error
+}
 
 type Server struct {
 	cfg      config.Config
@@ -43,6 +44,11 @@ type Server struct {
 	pay      *payment.Client
 	log      *slog.Logger
 	signer   *oidc.Signer
+
+	// Test seams. New() wires both to store; production paths fall back to
+	// store when the fields are nil.
+	membership    orgMembership
+	productTokens productTokenAdmin
 }
 
 type ctxKey string
@@ -54,16 +60,24 @@ func New(cfg config.Config, store *billing.Store, verifier *auth.Verifier, pay *
 		log = slog.Default()
 	}
 	signer, _ := oidc.NewSigner()
-	return &Server{cfg: cfg, store: store, verifier: verifier, pay: pay, log: log, signer: signer}
+	s := &Server{cfg: cfg, store: store, verifier: verifier, pay: pay, log: log, signer: signer}
+	if store != nil {
+		s.membership = store
+		s.productTokens = store
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	// Public CLI bootstrap: no auth, no secrets (see docs/CLI.md).
+	mux.HandleFunc("GET /v1/cli/config", s.cliConfig)
 	mux.HandleFunc("GET /v1/me", s.withUser(s.me))
 	mux.HandleFunc("GET /v1/billing/plans", s.withUser(s.plans))
 	mux.HandleFunc("POST /v1/orgs/{orgID}/products/{product}/token", s.withUser(s.rateLimit("product_token", s.cfg.RateProductToken, s.userKey, s.issueProductToken)))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/products/{product}/tokens", s.withUser(s.listProductTokens))
+	mux.HandleFunc("DELETE /v1/orgs/{orgID}/products/{product}/tokens/{tokenHash}", s.withUser(s.revokeProductToken))
 	mux.HandleFunc("POST /internal/v1/products/{product}/tokens", s.withService(s.internalProductTokens))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/billing", s.withUser(s.billingView))
 	mux.HandleFunc("GET /v1/billing/orders", s.withUser(s.listOrders))
@@ -95,6 +109,31 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "roost-console", "time": time.Now().UTC()})
+}
+
+func (s *Server) oidcIssuer() string {
+	return strings.TrimRight(strings.TrimSpace(s.cfg.OIDCIssuer), "/")
+}
+
+// cliConfig is the public bootstrap document for roost-cli and desktop tooling.
+// It carries publishable values only: the Supabase project URL + anon key (public
+// by design), platform API URLs and the OIDC endpoints. Service secrets never
+// appear here; see docs/CLI.md.
+func (s *Server) cliConfig(w http.ResponseWriter, _ *http.Request) {
+	issuer := s.oidcIssuer()
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"supabase_url":      strings.TrimRight(strings.TrimSpace(s.cfg.SupabaseURL), "/"),
+		"supabase_anon_key": strings.TrimSpace(s.cfg.SupabaseAnonKey),
+		"console_api_url":   strings.TrimRight(strings.TrimSpace(s.cfg.ConsoleAPIURL), "/"),
+		"market_api_url":    strings.TrimRight(strings.TrimSpace(s.cfg.MarketAPIURL), "/"),
+		"memory_mcp_url":    s.causalMemoryMCPURL(),
+		"oidc": map[string]any{
+			"issuer":                 issuer,
+			"authorization_endpoint": issuer + "/oauth/authorize",
+			"token_endpoint":         issuer + "/oauth/token",
+		},
+	})
 }
 
 func (s *Server) cors(next http.Handler) http.Handler {
@@ -238,7 +277,16 @@ func userFrom(r *http.Request) *auth.User {
 }
 
 func (s *Server) requireOrg(w http.ResponseWriter, r *http.Request, orgID string) bool {
-	role, err := s.store.Membership(r.Context(), orgID, userFrom(r).ID)
+	membership := s.membership
+	if membership == nil && s.store != nil {
+		membership = s.store
+	}
+	u := userFrom(r)
+	if u == nil || membership == nil {
+		writeError(w, http.StatusForbidden, "forbidden", "not a member of this organization")
+		return false
+	}
+	role, err := membership.Membership(r.Context(), orgID, u.ID)
 	if err != nil || role == "" {
 		writeError(w, http.StatusForbidden, "forbidden", "not a member of this organization")
 		return false
@@ -263,7 +311,7 @@ func (s *Server) issueProductToken(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token": token, "token_hash": meta.TokenHash, "org_id": orgID, "product": product,
-		"mcp_url": causalMemoryMCPURL(),
+		"mcp_url": s.causalMemoryMCPURL(),
 	})
 }
 
@@ -273,12 +321,54 @@ func (s *Server) listProductTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	product := r.PathValue("product")
-	tokens, err := s.store.ListProductTokens(r.Context(), orgID, product)
+	service := s.productTokenService()
+	if service == nil {
+		writeError(w, http.StatusServiceUnavailable, "internal_error", "token store is not configured")
+		return
+	}
+	tokens, err := service.ListProductTokens(r.Context(), orgID, product)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens, "mcp_url": causalMemoryMCPURL()})
+	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens, "mcp_url": s.causalMemoryMCPURL()})
+}
+
+// revokeProductToken revokes one causal-memory token of the caller's org.
+//
+// Requires a Supabase user session and org membership. The token hash comes from
+// the stored listing (the raw cm_ token is never stored). Revocation is
+// idempotent for an already-revoked token of this org; a hash of another org or
+// an unknown hash is 404 so existence is not leaked.
+func (s *Server) revokeProductToken(w http.ResponseWriter, r *http.Request) {
+	orgID := r.PathValue("orgID")
+	if !s.requireOrg(w, r, orgID) {
+		return
+	}
+	product := r.PathValue("product")
+	if product != "causal-memory" {
+		writeError(w, http.StatusBadRequest, "unsupported_product", "token revocation is only available for causal-memory")
+		return
+	}
+	tokenHash := strings.TrimSpace(r.PathValue("tokenHash"))
+	if tokenHash == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "token hash is required")
+		return
+	}
+	service := s.productTokenService()
+	if service == nil {
+		writeError(w, http.StatusServiceUnavailable, "internal_error", "token store is not configured")
+		return
+	}
+	if err := service.RevokeProductToken(r.Context(), orgID, product, tokenHash); err != nil {
+		if errors.Is(err, billing.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "token not found")
+			return
+		}
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) internalProductTokens(w http.ResponseWriter, r *http.Request) {
@@ -295,11 +385,22 @@ func (s *Server) internalProductTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
 }
 
-func causalMemoryMCPURL() string {
-	if v := strings.TrimSpace(sCausalMCPURL); v != "" {
+func (s *Server) causalMemoryMCPURL() string {
+	if v := strings.TrimSpace(s.cfg.MemoryMCPURL); v != "" {
 		return v
 	}
 	return "https://causal-memory.com/memory/mcp"
+}
+
+// productTokenService falls back to the real store when no test seam is set.
+func (s *Server) productTokenService() productTokenAdmin {
+	if s.productTokens != nil {
+		return s.productTokens
+	}
+	if s.store == nil {
+		return nil
+	}
+	return s.store
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -511,7 +612,7 @@ func (s *Server) redirectURIAllowed(uri string) bool {
 }
 
 func (s *Server) oidcDiscovery(w http.ResponseWriter, _ *http.Request) {
-	issuer := s.cfg.OIDCIssuer
+	issuer := s.oidcIssuer()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                           issuer,
 		"authorization_endpoint":           issuer + "/oauth/authorize",

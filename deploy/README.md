@@ -26,4 +26,11 @@ roost-console-api.service       systemd
 - 生产数据库角色 `roost_api` 和密码
 - DNS：`console.roostbots.com` / `api.roostbots.com`（如需独立域名）
 
+可选公开基址（CLI 引导配置 `GET /v1/cli/config` 会返回，默认值已指向现网；
+staging 时按需覆盖，均为公开值不是 secret）：
+
+- `CONSOLE_API_URL=https://www.roostbots.com/console-api`
+- `MARKET_API_URL=https://www.roostbots.com/api`
+- `CAUSAL_MEMORY_MCP_URL=https://causal-memory.com/memory/mcp`
+
 当前使用路径式部署，不依赖新 DNS。

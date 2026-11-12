@@ -30,6 +30,11 @@ type Config struct {
 	OIDCClientSecret  string
 	OIDCRedirectURIs  string
 	OIDCConsentURL    string
+	// Public URLs handed to the CLI bootstrap endpoint. They are display/config
+	// values, never secrets.
+	MarketAPIURL  string
+	ConsoleAPIURL string
+	MemoryMCPURL  string
 }
 
 func Load() Config {
@@ -73,6 +78,9 @@ func Load() Config {
 		OIDCClientSecret:  get("OIDC_CLIENT_SECRET", ""),
 		OIDCRedirectURIs:  get("OIDC_REDIRECT_URIS", ""),
 		OIDCConsentURL:    get("OIDC_CONSENT_URL", "https://www.roostbots.com/console/oauth/authorize"),
+		MarketAPIURL:      strings.TrimRight(get("MARKET_API_URL", "https://www.roostbots.com/api"), "/"),
+		ConsoleAPIURL:     strings.TrimRight(get("CONSOLE_API_URL", "https://www.roostbots.com/console-api"), "/"),
+		MemoryMCPURL:      strings.TrimRight(get("CAUSAL_MEMORY_MCP_URL", get("MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp")), "/"),
 	}
 }
 
