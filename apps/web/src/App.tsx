@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
 import { api, type BillingView, type MeResponse, type Order, type Plan } from './lib/api';
@@ -482,11 +482,19 @@ function Orders({ orders }: { orders: Order[] }) {
   );
 }
 
+// First-party clients are trusted for the identity handoff: the user has
+// already signed into the unified Roost organization, and the server still
+// validates the registered redirect_uri + client secret at token exchange.
+// Any other client keeps the explicit consent screen.
+const FIRST_PARTY_OIDC_CLIENTS = new Set(['market', 'roostbot']);
+
 function OAuthAuthorize({ session }: { session: Session }) {
   const params = new URLSearchParams(window.location.search);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const clientId = params.get('client_id') ?? 'roostbot';
+  const trusted = FIRST_PARTY_OIDC_CLIENTS.has(clientId);
+  const autoStarted = useRef(false);
 
   async function allow() {
     setBusy(true);
@@ -509,6 +517,12 @@ function OAuthAuthorize({ session }: { session: Session }) {
     }
   }
 
+  useEffect(() => {
+    if (!trusted || autoStarted.current) return;
+    autoStarted.current = true;
+    void allow();
+  }, [trusted]);
+
   function deny() {
     const redirect = params.get('redirect_uri');
     if (!redirect) return;
@@ -519,6 +533,31 @@ function OAuthAuthorize({ session }: { session: Session }) {
     window.location.assign(url.toString());
   }
 
+  if (trusted) {
+    return (
+      <main className="consent">
+        <div className="consent__card">
+          <Logo />
+          <p className="kicker" style={{ marginTop: 30 }}>FIRST-PARTY HANDOFF</p>
+          <h1>正在连接 {clientId}</h1>
+          <p className="consent__lead">
+            你已登录统一 Roost 组织，正在把同一个身份交给 {clientId}。这是第一方工作台，
+            不需要重复确认。
+          </p>
+          <div className="consent__org">
+            <span className="tag tag--live">SIGNED IN</span>
+            <span>{session.user.email}</span>
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          <div className="consent__actions">
+            <button className="btn btn--ghost" onClick={deny} disabled={busy}>取消</button>
+            <button className="btn btn--ink" onClick={allow} disabled={busy}>{busy ? '连接中…' : '重新连接'}</button>
+          </div>
+          <p className="consent__foot">Roost Cloud · 统一组织身份</p>
+        </div>
+      </main>
+    );
+  }
   return (
     <main className="consent">
       <div className="consent__card">
