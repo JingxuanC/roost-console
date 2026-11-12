@@ -225,3 +225,20 @@ button { cursor: pointer; }
 .causal__token { display: block; max-width: 100%; overflow-wrap: anywhere; padding: 10px 12px; border-radius: 7px; background: var(--ink); color: var(--white); font-family: var(--mono); font-size: 10px; }
 .causal__hint { margin: 0; font-size: 10px; }
 @media (max-width: 980px) { .causal { grid-template-columns: 1fr; } }
+/* Consolidated workspace launcher: one organization, one starting point. */
+.workspaces { margin-top: 30px; }
+.workspaces__head { display: grid; grid-template-columns: 1fr .8fr; gap: 30px; align-items: end; margin-bottom: 18px; }
+.workspaces__head h2 { margin: 0; font-family: var(--serif); font-size: clamp(26px, 2.8vw, 34px); font-weight: 400; letter-spacing: -.04em; }
+.workspaces__intro { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.75; }
+.workspace-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.workspace-card { display: flex; flex-direction: column; min-height: 172px; padding: 20px; border: 1px solid var(--ink); border-radius: 14px; background: var(--ink); color: var(--white); text-decoration: none; transition: transform 140ms ease, box-shadow 140ms ease; }
+.workspace-card:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(27, 24, 20, .18); }
+.workspace-card__top { display: flex; align-items: center; justify-content: space-between; }
+.workspace-card__meta { color: rgba(251, 248, 244, .42); font-family: var(--mono); font-size: 9px; letter-spacing: .13em; }
+.workspace-card__arrow { color: var(--accent); font-family: var(--mono); }
+.workspace-card h3 { margin: 18px 0 7px; color: var(--white); font-size: 17px; font-weight: 500; letter-spacing: -.02em; }
+.workspace-card p { margin: 0 0 18px; color: rgba(251, 248, 244, .58); font-size: 11px; line-height: 1.65; }
+.workspace-card__action { margin-top: auto; color: var(--accent); font-family: var(--mono); font-size: 10px; }
+.product-card--link { display: block; text-decoration: none; color: inherit; transition: border-color 140ms ease, transform 140ms ease; }
+.product-card--link:hover { border-color: var(--ink); transform: translateY(-1px); }
+@media (max-width: 860px) { .workspaces__head { grid-template-columns: 1fr; gap: 8px; } .workspace-grid { grid-template-columns: 1fr; } }

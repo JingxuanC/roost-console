@@ -15,6 +15,62 @@ const CREDIT_PACKS = [
   { sku: 'credit_500', label: '50,000 credits', price: '¥500' },
 ];
 
+const WORKSPACES = [
+  {
+    key: 'sandbox',
+    meta: 'WORKSPACE',
+    title: 'Roost Sandbox',
+    desc: '创建云电脑、打开 Terminal、管理快照和规格。',
+    action: '打开 Sandbox',
+    href: '/market/sandboxes?sso=1&next=%2Fsandboxes',
+  },
+  {
+    key: 'market',
+    meta: 'MARKET',
+    title: 'Roost Market',
+    desc: 'Provider 节点、租约、上架容量与收益。',
+    action: '进入 Market',
+    href: '/market/?sso=1&next=%2Fmarket',
+  },
+  {
+    key: 'billing',
+    meta: 'ORGANIZATION',
+    title: '组织与账单',
+    desc: '余额、套餐、订单、用量与发票。',
+    action: '查看账单',
+    href: '#billing',
+  },
+];
+
+function Workspaces() {
+  return (
+    <section className="workspaces" aria-labelledby="workspaces-title">
+      <div className="workspaces__head">
+        <div>
+          <p className="kicker">START HERE</p>
+          <h2 id="workspaces-title">一个组织，四个工作台。</h2>
+        </div>
+        <p className="workspaces__intro">
+          所有工作台共享同一个组织、同一份余额和同一套凭证。从这里进入，不用再记多个账号。
+        </p>
+      </div>
+      <div className="workspace-grid">
+        {WORKSPACES.map((item) => (
+          <a className="workspace-card" href={item.href} key={item.key}>
+            <div className="workspace-card__top">
+              <span className="workspace-card__meta">{item.meta}</span>
+              <span className="workspace-card__arrow" aria-hidden="true">→</span>
+            </div>
+            <h3>{item.title}</h3>
+            <p>{item.desc}</p>
+            <span className="workspace-card__action">{item.action}</span>
+          </a>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function credits(n: number) {
   return new Intl.NumberFormat('zh-CN').format(n);
 }
@@ -55,7 +111,11 @@ function AuthScreen() {
     setNotice('');
     try {
       if (mode === 'signup') {
-        const { data, error } = await supabase.auth.signUp({ email, password });
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: { emailRedirectTo: `${window.location.origin}/console/` },
+        });
         if (error) throw error;
         if (!data.session) {
           setNotice('账号已创建，请查收验证邮件后登录。');
@@ -77,9 +137,9 @@ function AuthScreen() {
         <Logo />
         <div className="auth__story-body">
           <p className="eyebrow"><span className="dot" /> ONE ORGANIZATION</p>
-          <h1>一个账号，<br /><span>四个产品。</span></h1>
+          <h1>一个账号，<br /><span>所有工作台。</span></h1>
           <p className="auth__lead">
-            Roost 组织统一账号、积分和账单。注册之后，dsalpha、market、causal-memory
+            Roost 组织统一账号、积分和账单。注册之后，Sandbox、Market、dsalpha、causal-memory
             共用同一份余额，不用再分别充值。
           </p>
           <div className="auth__ledger">
@@ -88,7 +148,7 @@ function AuthScreen() {
               <span className="tag tag--live">active</span>
             </div>
             <div className="auth__ledger-row"><span>余额</span><strong>12,480 credits</strong></div>
-            <div className="auth__ledger-row"><span>产品</span><span>dsalpha · market · causal-memory</span></div>
+            <div className="auth__ledger-row"><span>产品</span><span>sandbox · market · dslpha · causal-memory</span></div>
             <div className="auth__ledger-row"><span>账单</span><span>一个组织，一份账单</span></div>
           </div>
         </div>
@@ -130,6 +190,8 @@ function Header({ email, onSignOut }: { email: string; onSignOut: () => void }) 
     <header className="topbar">
       <Logo />
       <nav className="topbar__nav">
+        <a href="/market/sandboxes?sso=1&next=%2Fsandboxes">Sandbox</a>
+        <a href="/market/?sso=1&next=%2Fmarket">Market</a>
         <a className="active" href="#billing">账单</a>
         <a href="#products">产品</a>
         <a href="#plans">套餐</a>
@@ -175,7 +237,7 @@ function Products({ billing }: { billing: BillingView }) {
       <div className="section__head">
         <div>
           <p className="kicker">PRODUCTS</p>
-          <h2>一个余额，三个产品。</h2>
+          <h2>一个余额，所有产品。</h2>
         </div>
         <p className="section__intro">每个产品共享组织钱包，同时有独立的月度上限，避免一个任务吃光所有积分。</p>
       </div>
@@ -183,8 +245,13 @@ function Products({ billing }: { billing: BillingView }) {
         {billing.products.map((product) => {
           const cap = product.monthly_cap_credits ?? 0;
           const pct = cap > 0 ? Math.min(100, Math.round((product.used_this_month / cap) * 100)) : 0;
-          return (
-            <article className="product-card" key={product.product}>
+          const href =
+            product.product === 'market' ? '/market/?sso=1&next=%2Fmarket' :
+            product.product === 'causal-memory' ? 'https://causal-memory.com' :
+            product.product === 'dslpha' ? 'https://dsalpha.roostbots.com' :
+            undefined;
+          const body = (
+            <>
               <div className="product-card__head">
                 <span className={`product-dot product-dot--${product.product}`} />
                 <span className="tag">{product.enabled ? 'enabled' : 'disabled'}</span>
@@ -196,7 +263,12 @@ function Products({ billing }: { billing: BillingView }) {
                 <span>{credits(product.used_this_month)} / {cap ? credits(cap) : '不限'}</span>
                 <span>{pct}%</span>
               </div>
-            </article>
+            </>
+          );
+          return href ? (
+            <a className="product-card product-card--link" href={href} key={product.product}>{body}</a>
+          ) : (
+            <article className="product-card" key={product.product}>{body}</article>
           );
         })}
       </div>
@@ -529,9 +601,10 @@ function Console({ session }: { session: Session }) {
             <p className="kicker">ORGANIZATION</p>
             <h1>{me.org.name}</h1>
           </div>
-          <p className="page__intro-note">一个组织 ID，贯穿 dslpha、market 与 causal-memory。积分实时共享。</p>
+          <p className="page__intro-note">一个组织 ID，贯穿 Sandbox、Market、dslpha 与 causal-memory。积分与凭证实时共享。</p>
         </div>
         {error && <p className="form-error">{error}</p>}
+        <Workspaces />
         <WalletCard billing={me.billing} />
         <Products billing={me.billing} />
         <CausalMemory token={token} orgId={me.org.id} />
