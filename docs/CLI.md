@@ -58,27 +58,37 @@ curl -sS https://www.roostbots.com/console-api/v1/cli/config
    {"email": "...", "password": "..."}
    → access_token（Supabase 用户 JWT）
 
-2. 无头 OIDC（复用 console 的 OIDC，PKCE）：
+2. 向 market 取这次 OIDC 授权的参数：
+   GET {market_api_url}/v1/auth/oidc/config
+   → {"enabled":true,"client_id":"<OIDC client>","redirect_url":"<market callback>",
+      "state":"...","nonce":"...","code_challenge":"...","scopes":["openid",...]}
+
+   state/nonce/PKCE verifier 由 market 服务端保存；CLI 不生成也不持有 verifier。
+
+3. 让 console 为当前 Supabase 用户批准这次授权：
    POST {console_api_url}/v1/oauth/authorize
    Authorization: Bearer <Supabase access_token>
-   {"response_type":"code","client_id":"roostbot",
-    "redirect_uri":"<已登记回调，如 roost-cli://oidc/callback>",
-    "code_challenge":"<S256>","code_challenge_method":"S256",
-    "scope":"openid email profile","state":"..."}
-   → {"redirect_url":"<redirect_uri>?code=..."}
+   {"response_type":"code",
+    "client_id":"<market 返回的 client_id>",
+    "redirect_uri":"<market 返回的 redirect_url>",
+    "code_challenge":"<market 返回的 code_challenge>",
+    "scope":"openid profile email",
+    "state":"<market 返回的 state>",
+    "nonce":"<market 返回的 nonce>"}
+   → {"redirect_url":"<market callback>?code=...&state=..."}
 
-3. 换 OIDC token：
-   POST {oidc.token_endpoint}
-   grant_type=authorization_code & code=... & redirect_uri=... & code_verifier=...
-   & client_id=roostbot
-   → {"access_token","id_token","token_type","expires_in",...}
-
-4. 用 OIDC token 按 market 契约换取 market access token
-   （端点与字段见 roost-market-service 的 docs/03-api-contract.md）。
+4. CLI 直接 GET 这个 market callback：
+   GET <redirect_url>
+   → market 服务端用保存的 code_verifier 向 console 的 oidc.token_endpoint
+     换 OIDC token，再把 market 自己的 {"access_token","refresh_token",
+     "expires_in",...} 返回给 CLI。
 ```
 
-`redirect_uri` 必须在 console 的 `OIDC_REDIRECT_URIS` 里预先登记；
-`client_secret` 在 CLI 场景留空（console 未配置 `OIDC_CLIENT_SECRET` 时允许）。
+`redirect_uri` 必须是 market 的 OIDC callback（例如
+`https://www.roostbots.com/api/v1/auth/oidc/callback`），并在 console 的
+`OIDC_REDIRECT_URIS` 里预先登记；`roost-cli://` 回调不属于当前无头流程。
+CLI 不直接调用 `oidc.token_endpoint`，也不持有 `client_secret`：PKCE
+verifier 和 client secret 都只在 market 服务端使用。
 
 ## 2. `DELETE /v1/orgs/{orgID}/products/causal-memory/tokens/{tokenHash}`
 
