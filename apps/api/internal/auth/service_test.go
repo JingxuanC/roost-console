@@ -43,3 +43,20 @@ func TestServiceSignatureSkew(t *testing.T) {
 	r := signedRequest(body, "secret", time.Now().Add(-10*time.Minute))
 	if VerifyServiceSignature(r, body, "secret") { t.Fatal("stale timestamp accepted") }
 }
+
+func TestServiceSignatureForPublicPath(t *testing.T) {
+	body := []byte(`{"run_ref":"r1"}`)
+	r, _ := http.NewRequest(http.MethodPost, "https://api.example/api/auth/billing/leases/acquire", nil)
+	publicURI := "/console-api" + r.URL.RequestURI()
+	ts, nonce, sig := SignService("dslpha", r.Method, publicURI, body, "secret", time.Now())
+	r.Header.Set("X-Roost-Service", "dslpha")
+	r.Header.Set("X-Roost-Timestamp", ts)
+	r.Header.Set("X-Roost-Nonce", nonce)
+	r.Header.Set("X-Roost-Signature", sig)
+	if !VerifyServiceSignatureForURI(r, body, "secret", publicURI) {
+		t.Fatal("public-path signature rejected")
+	}
+	if VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("stripped-path signature accepted when client signed the public path")
+	}
+}

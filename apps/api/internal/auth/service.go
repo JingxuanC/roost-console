@@ -34,7 +34,18 @@ func SignService(service, method, requestURI string, body []byte, secret string,
 	return ts, nonce, hex.EncodeToString(mac.Sum(nil))
 }
 
+// VerifyServiceSignature checks the request's signed-service headers against
+// the request URI exactly as this process received it.
 func VerifyServiceSignature(r *http.Request, body []byte, secret string) bool {
+	return VerifyServiceSignatureForURI(r, body, secret, r.URL.RequestURI())
+}
+
+// VerifyServiceSignatureForURI is VerifyServiceSignature against an explicit
+// signing path. A deployment behind a prefix-stripping proxy (nginx
+// `location /console-api/`) receives the stripped path, while first-party
+// clients sign the public path they called. The caller passes each candidate
+// path here so one shared secret accepts both forms.
+func VerifyServiceSignatureForURI(r *http.Request, body []byte, secret, requestURI string) bool {
 	service := strings.TrimSpace(r.Header.Get("X-Roost-Service"))
 	ts := strings.TrimSpace(r.Header.Get("X-Roost-Timestamp"))
 	nonce := strings.TrimSpace(r.Header.Get("X-Roost-Nonce"))
@@ -50,7 +61,7 @@ func VerifyServiceSignature(r *http.Request, body []byte, secret string) bool {
 		return false
 	}
 	sum := sha256.Sum256(body)
-	input := service + "\n" + ts + "\n" + nonce + "\n" + r.Method + "\n" + r.URL.RequestURI() + "\n" + hex.EncodeToString(sum[:])
+	input := service + "\n" + ts + "\n" + nonce + "\n" + r.Method + "\n" + requestURI + "\n" + hex.EncodeToString(sum[:])
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(input))
 	want := hex.EncodeToString(mac.Sum(nil))

@@ -136,7 +136,18 @@ func (s *Store) Reserve(ctx context.Context, orgID, product, runRef string, esti
 		orgID, product, runRef, estimated, int(ttl.Seconds())).Scan(&l.ID, &l.OrgID, &l.Product, &l.RunRef, &l.ReservedCredits, &l.Status, &l.ExpiresAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Lease{}, errors.New("run_ref already settled")
+			// The run already settled or was released. A retry is not an error:
+			// answer with the row that exists so a client's retry loop stops
+			// instead of hammering a 500 every few seconds.
+			var settled Lease
+			if qerr := tx.QueryRow(ctx, `
+				select id,org_id,product,run_ref,reserved_credits,status,expires_at
+				from billing.usage_leases
+				where org_id=$1 and product=$2 and run_ref=$3`,
+				orgID, product, runRef).Scan(&settled.ID, &settled.OrgID, &settled.Product, &settled.RunRef, &settled.ReservedCredits, &settled.Status, &settled.ExpiresAt); qerr != nil {
+				return Lease{}, qerr
+			}
+			return settled, tx.Commit(ctx)
 		}
 		return Lease{}, err
 	}

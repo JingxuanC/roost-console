@@ -49,6 +49,11 @@ type Server struct {
 	// store when the fields are nil.
 	membership    orgMembership
 	productTokens productTokenAdmin
+
+	// Public path prefixes this deployment is mounted under (e.g. "/console-api"
+	// behind the nginx prefix strip). First-party clients sign the public path;
+	// the API sees the stripped one, so both are accepted for the same secret.
+	signingPrefixes []string
 }
 
 type ctxKey string
@@ -61,11 +66,26 @@ func New(cfg config.Config, store *billing.Store, verifier *auth.Verifier, pay *
 	}
 	signer, _ := oidc.NewSigner()
 	s := &Server{cfg: cfg, store: store, verifier: verifier, pay: pay, log: log, signer: signer}
+	s.signingPrefixes = signingPathPrefixes(cfg.PublicBaseURL)
 	if store != nil {
 		s.membership = store
 		s.productTokens = store
 	}
 	return s
+}
+
+// signingPathPrefixes returns the public mount path ("" for a root mount) that
+// a deployment's proxy strips before a request reaches this process.
+func signingPathPrefixes(publicBase string) []string {
+	u, err := url.Parse(strings.TrimSpace(publicBase))
+	if err != nil {
+		return nil
+	}
+	prefix := strings.TrimRight(u.Path, "/")
+	if prefix == "" || prefix == "/" {
+		return nil
+	}
+	return []string{prefix}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -228,7 +248,32 @@ func (s *Server) verifyService(service string, r *http.Request, body []byte) boo
 		return false
 	}
 	for _, secret := range s.cfg.ServiceSecrets[service] {
-		if secret != "" && auth.VerifyServiceSignature(r, body, secret) {
+		if secret == "" {
+			continue
+		}
+		if auth.VerifyServiceSignature(r, body, secret) {
+			return true
+		}
+		// The proxy in front of this API strips the public mount prefix, but a
+		// first-party client signs the path it called. Accept that form too.
+		for _, prefix := range s.signingPrefixes {
+			if auth.VerifyServiceSignatureForURI(r, body, secret, prefix+r.URL.RequestURI()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// verifyLegacyServiceToken accepts the pre-HMAC service token first-party
+// builds still send during migration. It is the same shared secret, compared in
+// constant time; new builds send the signed headers and take the HMAC path.
+func (s *Server) verifyLegacyServiceToken(service, token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, secret := range s.cfg.ServiceSecrets[service] {
+		if secret != "" && subtle.ConstantTimeCompare([]byte(secret), []byte(token)) == 1 {
 			return true
 		}
 	}
@@ -746,7 +791,17 @@ func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
 		if service == "" {
 			service = "dslpha"
 		}
-		if !s.verifyService(service, r, body) {
+		verified := s.verifyService(service, r, body)
+		if !verified {
+			// Migration compatibility: older dslpha builds send only the shared
+			// X-Service-Token, without the signed headers. The same secret
+			// authenticates both forms; the HMAC path wins once present.
+			if s.verifyLegacyServiceToken(service, strings.TrimSpace(r.Header.Get("X-Service-Token"))) {
+				verified = true
+				s.log.Debug("legacy service token accepted", "service", service)
+			}
+		}
+		if !verified {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
 			return
 		}
@@ -755,6 +810,16 @@ func (s *Server) withCompatService(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
+		if userID == "" {
+			// Older first-party builds carry the user in the body (the legacy
+			// lease contract) and omit the header. Read it from there rather
+			// than refusing a call the same secret just authenticated.
+			var probe struct {
+				UserID string `json:"user_id"`
+			}
+			_ = json.Unmarshal(body, &probe)
+			userID = strings.TrimSpace(probe.UserID)
+		}
 		if userID == "" {
 			writeError(w, http.StatusBadRequest, "bad_request", "X-User-Id is required")
 			return
