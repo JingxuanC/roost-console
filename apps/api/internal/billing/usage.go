@@ -98,11 +98,18 @@ func (s *Store) Reserve(ctx context.Context, orgID, product, runRef string, esti
 		return Lease{}, err
 	}
 	// A retry of the same run must not reserve twice; it may only extend the
-	// existing reservation when the caller asks for a larger ceiling.
+	// existing reservation's ceiling and its lifetime. Refreshing the expiry is
+	// what keeps a long turn's lease alive: without it a turn outliving the TTL
+	// lets ExpireLeases free the reservation, and the later settle finds no
+	// active lease and loses the charge.
 	var existing Lease
 	err = tx.QueryRow(ctx, `select id,org_id,product,run_ref,reserved_credits,status,expires_at from billing.usage_leases where org_id=$1 and product=$2 and run_ref=$3 and status='active' for update`, orgID, product, runRef).Scan(&existing.ID, &existing.OrgID, &existing.Product, &existing.RunRef, &existing.ReservedCredits, &existing.Status, &existing.ExpiresAt)
 	if err == nil {
 		if estimated <= existing.ReservedCredits {
+			if _, err := tx.Exec(ctx, `update billing.usage_leases set expires_at=now()+make_interval(secs=>$2) where id=$1`, existing.ID, int(ttl.Seconds())); err != nil {
+				return Lease{}, err
+			}
+			existing.ExpiresAt = time.Now().Add(ttl)
 			return existing, tx.Commit(ctx)
 		}
 		delta := estimated - existing.ReservedCredits
@@ -274,9 +281,11 @@ func (s *Store) ExpireLeases(ctx context.Context) (int, error) {
 	return len(list), nil
 }
 
-// SettleByRun settles the active lease for a run ref. dslpha's compatibility
-// bridge only knows (user, run_ref), not the lease UUID, so this is the path it
-// uses when a turn ends. actual is the turn's measured spend.
+// SettleByRun settles the run's lease. dslpha's compatibility bridge only knows
+// (user, run_ref), not the lease UUID, so this is the path it uses when a turn
+// ends. actual is the turn's measured spend. An expired lease still settles:
+// ExpireLeases already freed its reservation, so only the spend is charged —
+// otherwise a turn that outlives its TTL would never be billed.
 func (s *Store) SettleByRun(ctx context.Context, orgID, product, runRef string, actual int64) (bool, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -285,14 +294,20 @@ func (s *Store) SettleByRun(ctx context.Context, orgID, product, runRef string, 
 	defer tx.Rollback(ctx)
 	var id string
 	var reserved int64
+	var status string
 	if err := tx.QueryRow(ctx, `
-		select id,reserved_credits from billing.usage_leases
-		where org_id=$1 and product=$2 and run_ref=$3 and status='active'
-		for update`, orgID, product, runRef).Scan(&id, &reserved); err != nil {
+		select id,reserved_credits,status from billing.usage_leases
+		where org_id=$1 and product=$2 and run_ref=$3 and status in ('active','expired')
+		for update`, orgID, product, runRef).Scan(&id, &reserved, &status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
 		return false, err
+	}
+	// An expired lease's reservation was already released by ExpireLeases;
+	// subtracting it again would corrupt the wallet's reserved total.
+	if status == "expired" {
+		reserved = 0
 	}
 	var balance int64
 	if err := tx.QueryRow(ctx, `select balance_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance); err != nil {
