@@ -399,8 +399,8 @@ func (s *Server) revokeProductToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	product := r.PathValue("product")
-	if product != "causal-memory" {
-		writeError(w, http.StatusBadRequest, "unsupported_product", "token revocation is only available for causal-memory")
+	if product != "causal-memory" && product != "relay" {
+		writeError(w, http.StatusBadRequest, "unsupported_product", "token revocation is only available for causal-memory and relay")
 		return
 	}
 	tokenHash := strings.TrimSpace(r.PathValue("tokenHash"))

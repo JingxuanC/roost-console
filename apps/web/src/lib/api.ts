@@ -67,6 +67,15 @@ async function request<T>(path: string, token: string, init?: RequestInit): Prom
   return body as T;
 }
 
+export interface RelayKey {
+  token_hash: string;
+  org_id: string;
+  product: string;
+  created_at: string;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+}
+
 export const api = {
   me: (token: string) => request<MeResponse>('/v1/me', token),
   plans: (token: string) => request<{ plans: Plan[] }>('/v1/billing/plans', token),
@@ -75,6 +84,12 @@ export const api = {
   getOrder: (token: string, id: string) => request<{ order: Order }>(`/v1/billing/orders/${id}`, token),
   devPay: (token: string, id: string) => request<{ ok: boolean }>(`/v1/dev/orders/${id}/pay`, token, { method: 'POST' }),
   orders: (token: string) => request<{ orders: Order[] }>('/v1/billing/orders', token),
+  relayKeys: (token: string, orgId: string) =>
+    request<{ tokens: RelayKey[] }>(`/v1/orgs/${orgId}/products/relay/tokens`, token),
+  createRelayKey: (token: string, orgId: string) =>
+    request<{ token: string; token_hash: string }>(`/v1/orgs/${orgId}/products/relay/token`, token, { method: 'POST' }),
+  revokeRelayKey: (token: string, orgId: string, hash: string) =>
+    request<{ ok: boolean }>(`/v1/orgs/${orgId}/products/relay/tokens/${hash}`, token, { method: 'DELETE' }),
   issueCausalToken: (token: string, orgId: string) =>
     request<{ token: string; mcp_url: string; org_id: string }>(`/v1/orgs/${orgId}/products/causal-memory/token`, token, { method: 'POST' }),
   authorizeOAuth: (token: string, body: Record<string, string>) =>

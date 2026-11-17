@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
-import { api, type BillingView, type MeResponse, type Order, type Plan } from './lib/api';
+import { api, type BillingView, type MeResponse, type Order, type Plan, type RelayKey } from './lib/api';
 
 const PRODUCT_LABELS: Record<string, string> = {
   dslpha: 'DeepSeek Alpha · 投研工作台',
@@ -467,6 +467,75 @@ function OrderModal({ token, order, onClose, onPaid }: { token: string; order: O
   );
 }
 
+
+function RelayKeys({ token, orgId }: { token: string; orgId: string }) {
+  const [keys, setKeys] = useState<RelayKey[]>([]);
+  const [busy, setBusy] = useState('');
+  const [created, setCreated] = useState('');
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.relayKeys(token, orgId);
+      setKeys(data.tokens ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载 API Key 失败');
+    }
+  }, [token, orgId]);
+  useEffect(() => { void load(); }, [load]);
+
+  async function create() {
+    setBusy('create'); setError(''); setCreated('');
+    try {
+      const data = await api.createRelayKey(token, orgId);
+      setCreated(data.token);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建 API Key 失败');
+    } finally { setBusy(''); }
+  }
+  async function revoke(hash: string) {
+    setBusy(hash); setError('');
+    try { await api.revokeRelayKey(token, orgId, hash); await load(); }
+    catch (err) { setError(err instanceof Error ? err.message : '吊销失败'); }
+    finally { setBusy(''); }
+  }
+
+  return (
+    <section className="section" id="api-keys">
+      <div className="section__head">
+        <div><p className="kicker">API KEYS</p><h2>模型中转 Key。</h2></div>
+        <p className="section__intro">用于 OpenAI 兼容接口；Key 只在创建时显示一次，消费共享组织 token 余额。</p>
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16 }}>
+        <button className="btn btn--accent" onClick={() => void create()} disabled={busy === 'create'}>
+          {busy === 'create' ? '创建中…' : '创建 API Key'}
+        </button>
+        {created && (
+          <code style={{ padding: '8px 12px', background: 'rgba(255,255,255,.06)', borderRadius: 8, wordBreak: 'break-all' }}>
+            {created}
+          </code>
+        )}
+      </div>
+      <div className="table">
+        <div className="table__row table__row--head"><span>Key（hash）</span><span>创建时间</span><span>最近使用</span><span>操作</span></div>
+        {keys.length === 0 && <div className="table__empty">还没有 API Key。</div>}
+        {keys.map((k) => (
+          <div className="table__row" key={k.token_hash}>
+            <span className="mono">{k.token_hash.slice(0, 16)}…</span>
+            <span>{new Date(k.created_at).toLocaleString('zh-CN')}</span>
+            <span>{k.last_used_at ? new Date(k.last_used_at).toLocaleString('zh-CN') : '—'}</span>
+            <span>
+              <button className="btn btn--ghost" disabled={busy === k.token_hash} onClick={() => void revoke(k.token_hash)}>吊销</button>
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Orders({ orders }: { orders: Order[] }) {
   orders = orders ?? [];
   return (
@@ -655,6 +724,7 @@ function Console({ session }: { session: Session }) {
         <Workspaces />
         <WalletCard billing={me.billing} />
         <Products billing={me.billing} />
+        <RelayKeys token={token} orgId={me.org.id} />
         <CausalMemory token={token} orgId={me.org.id} />
         <Plans plans={plans} current={me.billing.plan.code} alwaysOnUntil={me.billing.always_on_until} onBuy={buy} busy={busy} />
         <Orders orders={orders} />
