@@ -1,0 +1,169 @@
+name: deploy
+
+# Builds both console deployables on a runner (the production host is small and
+# must not compile there) and ships them over SSH. Only a push to `main`, or a
+# manual run, deploys: pull requests stop at the checks in ci.yml.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-console
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: apps/api/go.sum
+      - name: Test
+        working-directory: apps/api
+        run: go test ./...
+      - name: Build
+        working-directory: apps/api
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "$GITHUB_WORKSPACE/build/roost-console" ./cmd/roost-console
+          gzip -9 -c "$GITHUB_WORKSPACE/build/roost-console" > "$GITHUB_WORKSPACE/build/roost-console.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-api
+          path: build/roost-console.gz
+          retention-days: 3
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install
+        working-directory: apps/web
+        run: npm ci
+      - name: Build
+        working-directory: apps/web
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: npm run build -- --base=/console/
+      - name: Package
+        working-directory: apps/web
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          grep -oE 'assets/index-[^"]+\.js' dist/index.html > "$GITHUB_WORKSPACE/build/index-asset.txt"
+          tar -czf "$GITHUB_WORKSPACE/build/console-web.tgz" -C dist .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-web
+          path: |
+            build/console-web.tgz
+            build/index-asset.txt
+          retention-days: 3
+
+  deploy:
+    needs: [api, web]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: build
+          merge-multiple: true
+      - name: Configure SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Upload artifacts
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          scp -q -i ~/.ssh/deploy -o UserKnownHostsFile=~/.ssh/known_hosts \
+            build/roost-console.gz "$USER@$HOST:/tmp/roost-console-${{ github.sha }}.gz"
+          scp -q -i ~/.ssh/deploy -o UserKnownHostsFile=~/.ssh/known_hosts \
+            build/console-web.tgz "$USER@$HOST:/tmp/console-web-${{ github.sha }}.tgz"
+      - name: Deploy
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          SHA: ${{ github.sha }}
+        run: |
+          ASSET=$(cat build/index-asset.txt)
+          ssh -i ~/.ssh/deploy -o UserKnownHostsFile=~/.ssh/known_hosts "$USER@$HOST" "bash -s -- $SHA $ASSET" <<'REMOTE'
+          set -euo pipefail
+          SHA="$1"
+          ASSET="$2"
+          TS=$(date +%Y%m%d-%H%M%S)
+          API_DIR=/opt/roost/apps/console-api
+          SITE_DIR=/opt/roost/apps/site-official
+          API_BAK="roost-console.bak-$TS"
+          WEB_BAK="console.bak-$TS"
+
+          prune() {
+            # Keep the three newest backups of one artifact; older ones go.
+            ( cd "$1" && ls -1dt "$2"* 2>/dev/null | tail -n +4 | xargs -r rm -rf -- ) || true
+          }
+
+          # --- API binary -------------------------------------------------
+          cd "$API_DIR"
+          cp -a roost-console "$API_BAK"
+          gunzip -c "/tmp/roost-console-$SHA.gz" > /tmp/roost-console.new
+          chmod 755 /tmp/roost-console.new
+          mv /tmp/roost-console.new roost-console
+          sudo -n /usr/bin/systemctl restart roost-console-api
+          ok=0
+          for _ in $(seq 1 20); do
+            if curl -fsS -m 2 http://127.0.0.1:8790/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::API health check failed; rolling back"
+            cp -a "$API_BAK" roost-console
+            sudo -n /usr/bin/systemctl restart roost-console-api || true
+            exit 1
+          fi
+          prune "$API_DIR" "roost-console.bak-"
+          echo "api deployed ($SHA)"
+
+          # --- Console web ------------------------------------------------
+          cd "$SITE_DIR"
+          rm -rf console.new
+          mkdir console.new
+          tar -xzf "/tmp/console-web-$SHA.tgz" -C console.new
+          if [ -d console ]; then mv console "$WEB_BAK"; fi
+          mv console.new console
+          ok=0
+          for _ in $(seq 1 10); do
+            if curl -sk -m 3 -H 'Host: www.roostbots.com' https://127.0.0.1/console/ 2>/dev/null | grep -q "$ASSET"; then ok=1; break; fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::web health check failed; rolling back"
+            rm -rf console
+            mv "$WEB_BAK" console
+            exit 1
+          fi
+          prune "$SITE_DIR" "console.bak-"
+          echo "web deployed ($SHA)"
+
+          rm -f "/tmp/roost-console-$SHA.gz" "/tmp/console-web-$SHA.tgz"
+          REMOTE
+      - name: Verify public endpoints
+        run: |
+          curl -fsS -o /dev/null https://www.roostbots.com/console/
+          curl -fsS https://www.roostbots.com/console/ | grep -q "$(cat build/index-asset.txt)"
+          curl -fsS -o /dev/null https://www.roostbots.com/console-api/healthz
