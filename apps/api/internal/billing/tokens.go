@@ -31,7 +31,11 @@ func (s *Store) IssueProductToken(ctx context.Context, orgID, product string) (s
 	if _, err := rand.Read(raw); err != nil {
 		return "", ProductToken{}, err
 	}
-	token := "cm_" + base64.RawURLEncoding.EncodeToString(raw)
+	prefix := "cm_"
+	if product == "relay" {
+		prefix = "rk_"
+	}
+	token := prefix + base64.RawURLEncoding.EncodeToString(raw)
 	var t ProductToken
 	err := s.Pool.QueryRow(ctx, `
 		insert into billing.product_tokens (token_hash,org_id,product)
