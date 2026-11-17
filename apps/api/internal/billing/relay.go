@@ -82,26 +82,12 @@ func (s *Store) RelayReserve(ctx context.Context, orgID, requestID string, amoun
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	// Replay/conflict check.
-	var existing RelayReservation
-	var status string
-	err := s.Pool.QueryRow(ctx, `
-		select id,reserved_credits,status,expires_at from billing.usage_leases
-		where org_id=$1 and product='relay' and run_ref=$2`, orgID, requestID).
-		Scan(&existing.ID, &existing.Amount, &status, &existing.ExpiresAt)
-	if err == nil {
-		if existing.Amount != amount || status != "active" {
-			return RelayReservation{}, ErrRelayConflict
-		}
-		return existing, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return RelayReservation{}, err
-	}
-
+	// One statement for the common path: atomically reserve the wallet and
+	// insert the lease. Replays and races hit the unique key and fall back to a
+	// read below, so the request's first-token path pays one database round trip.
 	var out RelayReservation
 	var updated int64
-	err = s.Pool.QueryRow(ctx, `
+	err := s.Pool.QueryRow(ctx, `
 		with upd as (
 			update billing.wallets
 			set reserved_credits=reserved_credits+$3, version=version+1, updated_at=now()
@@ -121,16 +107,17 @@ func (s *Store) RelayReserve(ctx context.Context, orgID, requestID string, amoun
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		// A concurrent reserve won the unique key; return that hold.
-		var winner RelayReservation
+		// Replay or a concurrent reserve won the unique key; return that hold.
+		var existing RelayReservation
+		var status string
 		if qerr := s.Pool.QueryRow(ctx, `
-			select id,reserved_credits,expires_at from billing.usage_leases
+			select id,reserved_credits,status,expires_at from billing.usage_leases
 			where org_id=$1 and product='relay' and run_ref=$2`, orgID, requestID).
-			Scan(&winner.ID, &winner.Amount, &winner.ExpiresAt); qerr == nil {
-			if winner.Amount != amount {
+			Scan(&existing.ID, &existing.Amount, &status, &existing.ExpiresAt); qerr == nil {
+			if existing.Amount != amount || status != "active" {
 				return RelayReservation{}, ErrRelayConflict
 			}
-			return winner, nil
+			return existing, nil
 		}
 	}
 	if errors.Is(err, pgx.ErrNoRows) || updated == 0 {
