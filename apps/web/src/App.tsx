@@ -330,7 +330,7 @@ function CausalMemory({ token, orgId }: { token: string; orgId: string }) {
   );
 }
 
-function Plans({ plans, current, onBuy, busy }: { plans: Plan[]; current: string; onBuy: (sku: string) => void; busy: string }) {
+function Plans({ plans, current, alwaysOnUntil, onBuy, busy }: { plans: Plan[]; current: string; alwaysOnUntil?: string | null; onBuy: (sku: string) => void; busy: string }) {
   return (
     <section className="section" id="plans">
       <div className="section__head">
@@ -375,6 +375,15 @@ function Plans({ plans, current, onBuy, busy }: { plans: Plan[]; current: string
             <strong>{pack.price}</strong>
           </button>
         ))}
+        {(current === 'pro' || current === 'max') && (
+          <button className="pack" disabled={busy === 'addon_always_on_30d'} onClick={() => onBuy('addon_always_on_30d')}>
+            <span>
+              Always-on 沙箱（每台/30 天）
+              {alwaysOnUntil ? ` · 已开通至 ${new Date(alwaysOnUntil).toLocaleDateString('zh-CN')}` : ''}
+            </span>
+            <strong>¥49</strong>
+          </button>
+        )}
       </div>
     </section>
   );
@@ -647,7 +656,7 @@ function Console({ session }: { session: Session }) {
         <WalletCard billing={me.billing} />
         <Products billing={me.billing} />
         <CausalMemory token={token} orgId={me.org.id} />
-        <Plans plans={plans} current={me.billing.plan.code} onBuy={buy} busy={busy} />
+        <Plans plans={plans} current={me.billing.plan.code} alwaysOnUntil={me.billing.always_on_until} onBuy={buy} busy={busy} />
         <Orders orders={orders} />
         <footer className="page__foot">
           <span>© 2026 Roost · 统一控制面</span>

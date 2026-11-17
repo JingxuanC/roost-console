@@ -876,9 +876,13 @@ func (s *Server) compatValidate(w http.ResponseWriter, r *http.Request) {
 		"used_credits": e.Balance - e.Available, "credit_limit": e.Balance,
 		"remaining_credits": e.Available, "message": "Roost 积分不足，请充值",
 	}
+	scopes := make([]string, 0, 1)
+	if s.store.AlwaysOnActive(r.Context(), org.ID) {
+		scopes = append(scopes, "workspace:always_on")
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_tier": accessTier(e.PlanCode), "plan_display_name": e.PlanCode,
-		"scopes": []string{}, "quota": quota,
+		"scopes": scopes, "quota": quota,
 	})
 }
 
@@ -1099,6 +1103,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusTooManyRequests, "product_cap", "product monthly cap reached")
 	case errors.Is(err, billing.ErrProductNotEnabled):
 		writeError(w, http.StatusForbidden, "product_disabled", "product is not enabled")
+	case errors.Is(err, billing.ErrAddonNotEligible):
+		writeError(w, http.StatusBadRequest, "addon_not_eligible", "the always-on add-on requires the Pro or Max plan")
 	default:
 		s.log.Error("api error", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")

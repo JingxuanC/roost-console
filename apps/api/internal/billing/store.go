@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("not found")
 var ErrInsufficientCredits = errors.New("insufficient credits")
 var ErrProductNotEnabled = errors.New("product not enabled")
 var ErrProductCap = errors.New("product monthly cap reached")
+var ErrAddonNotEligible = errors.New("addon not available on this plan")
 
 type Store struct{ Pool *pgxpool.Pool }
 
@@ -45,17 +46,18 @@ type Wallet struct {
 }
 
 type ProductState struct {
-	Product      string `json:"product"`
-	Enabled      bool   `json:"enabled"`
-	MonthlyCap   *int64 `json:"monthly_cap_credits"`
-	UsedThisMonth int64 `json:"used_this_month"`
+	Product       string `json:"product"`
+	Enabled       bool   `json:"enabled"`
+	MonthlyCap    *int64 `json:"monthly_cap_credits"`
+	UsedThisMonth int64  `json:"used_this_month"`
 }
 
 type BillingView struct {
-	Org      Org            `json:"org"`
-	Plan     Plan           `json:"plan"`
-	Wallet   Wallet         `json:"wallet"`
-	Products []ProductState `json:"products"`
+	Org           Org            `json:"org"`
+	Plan          Plan           `json:"plan"`
+	Wallet        Wallet         `json:"wallet"`
+	Products      []ProductState `json:"products"`
+	AlwaysOnUntil *time.Time     `json:"always_on_until,omitempty"`
 }
 
 type Order struct {
@@ -284,7 +286,33 @@ func (s *Store) Billing(ctx context.Context, orgID string) (BillingView, error) 
 		}
 		products = append(products, p)
 	}
-	return BillingView{Org: o, Plan: plan, Wallet: w, Products: products}, rows.Err()
+	view := BillingView{Org: o, Plan: plan, Wallet: w, Products: products}
+	if until, err := s.AlwaysOnUntil(ctx, orgID); err == nil && until.After(time.Now()) {
+		view.AlwaysOnUntil = &until
+	}
+	return view, rows.Err()
+}
+
+// AlwaysOnUntil returns the org's always-on add-on expiry, zero when unset.
+// The expiry rides on the fulfilled add-on order's raw payload, so the add-on
+// needs no table of its own.
+func (s *Store) AlwaysOnUntil(ctx context.Context, orgID string) (time.Time, error) {
+	var until *time.Time
+	err := s.Pool.QueryRow(ctx, `
+		select max((raw->>'addon_until')::timestamptz)
+		from billing.orders
+		where org_id=$1 and sku=$2 and status='fulfilled' and raw ? 'addon_until'`,
+		orgID, AlwaysOnSKU).Scan(&until)
+	if err != nil || until == nil {
+		return time.Time{}, err
+	}
+	return *until, nil
+}
+
+// AlwaysOnActive reports whether the org currently holds the always-on add-on.
+func (s *Store) AlwaysOnActive(ctx context.Context, orgID string) bool {
+	until, err := s.AlwaysOnUntil(ctx, orgID)
+	return err == nil && until.After(time.Now())
 }
 
 // currentPlan lazily expires a paid period. Credits are prepaid and stay in

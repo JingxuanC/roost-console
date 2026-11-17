@@ -26,6 +26,7 @@ export interface BillingView {
   plan: Plan;
   wallet: Wallet;
   products: ProductState[];
+  always_on_until?: string | null;
 }
 
 export interface MeResponse {

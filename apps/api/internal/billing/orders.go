@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,10 +20,16 @@ type CreditPack struct {
 	Title       string
 }
 
+// AlwaysOnSKU buys the always-on sandbox add-on. It carries no credits: its
+// effect is the billing.addons expiry that /api/auth/validate reports as the
+// workspace:always_on scope.
+const AlwaysOnSKU = "addon_always_on_30d"
+
 var CreditPacks = map[string]CreditPack{
 	"credit_50":  {"credit_50", 5000, 5000, "Roost 5,000 credits"},
 	"credit_100": {"credit_100", 10000, 10000, "Roost 10,000 credits"},
 	"credit_500": {"credit_500", 50000, 50000, "Roost 50,000 credits"},
+	AlwaysOnSKU:  {AlwaysOnSKU, 4900, 0, "Roost Always-on · 30 days"},
 }
 
 func randomTradeNo() string {
@@ -52,6 +59,22 @@ func (s *Store) CreateOrder(ctx context.Context, orgID, sku string) (Order, erro
 	pack, kind, err := s.Quote(ctx, sku)
 	if err != nil {
 		return Order{}, err
+	}
+	if sku == AlwaysOnSKU {
+		// The add-on is a Pro/Max optional, never a Starter one. Read the plan
+		// through the same lazy-expiry path Billing uses so an elapsed paid
+		// period cannot buy it.
+		var planCode string
+		if err := s.Pool.QueryRow(ctx, `select plan_code from public.organizations where id=$1`, orgID).Scan(&planCode); err != nil {
+			return Order{}, err
+		}
+		effective, err := s.currentPlan(ctx, orgID, planCode)
+		if err != nil {
+			return Order{}, err
+		}
+		if effective != "pro" && effective != "max" {
+			return Order{}, ErrAddonNotEligible
+		}
 	}
 	var o Order
 	err = s.Pool.QueryRow(ctx, `
@@ -119,9 +142,31 @@ func (s *Store) Fulfill(ctx context.Context, orderID, providerTradeNo string, am
 	if o.Status == "refunded" {
 		return fmt.Errorf("order refunded")
 	}
+	rawJSON := string(raw)
+	if o.SKU == AlwaysOnSKU {
+		// Stack on the current expiry so early renewals never lose days; the
+		// expiry lives on this order's raw payload.
+		var base time.Time
+		if err := tx.QueryRow(ctx, `
+			select greatest(coalesce(max((raw->>'addon_until')::timestamptz), now()), now())
+			from billing.orders
+			where org_id=$1 and sku=$2 and status in ('paid','fulfilled') and raw ? 'addon_until'`,
+			o.OrgID, AlwaysOnSKU).Scan(&base); err != nil {
+			return err
+		}
+		until := base.Add(30 * 24 * time.Hour)
+		payload := map[string]any{}
+		_ = json.Unmarshal(raw, &payload)
+		payload["addon_until"] = until.UTC().Format(time.RFC3339)
+		merged, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		rawJSON = string(merged)
+	}
 	if _, err := tx.Exec(ctx, `
 		update billing.orders set status='paid',provider_trade_no=$2,paid_at=now(),raw=$3,updated_at=now()
-		where id=$1`, o.ID, providerTradeNo, string(raw)); err != nil {
+		where id=$1`, o.ID, providerTradeNo, rawJSON); err != nil {
 		return err
 	}
 	if o.Credits > 0 {
