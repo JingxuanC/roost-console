@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
-import { api, type BillingView, type MeResponse, type Order, type Plan, type RelayKey } from './lib/api';
+import { api, type BillingView, type MeResponse, type Order, type Plan, type RelayKey, type AdminOrg } from './lib/api';
 
 const PRODUCT_LABELS: Record<string, string> = {
   dslpha: 'DeepSeek Alpha · 投研工作台',
@@ -536,6 +536,89 @@ function RelayKeys({ token, orgId }: { token: string; orgId: string }) {
   );
 }
 
+
+function AdminPanel({ token }: { token: string }) {
+  const [q, setQ] = useState('');
+  const [orgs, setOrgs] = useState<AdminOrg[]>([]);
+  const [selected, setSelected] = useState<{ org: AdminOrg; billing: BillingView; ledger: Array<Record<string, unknown>>; orders: Order[] } | null>(null);
+  const [delta, setDelta] = useState('');
+  const [reason, setReason] = useState('运营调整');
+  const [msg, setMsg] = useState('');
+  const [error, setError] = useState('');
+
+  async function search() {
+    setError('');
+    try { const d = await api.adminOrgs(token, q); setOrgs(d.orgs ?? []); }
+    catch (e) { setError(e instanceof Error ? e.message : '查询失败'); }
+  }
+  async function open(orgId: string) {
+    setError(''); setMsg('');
+    try { setSelected(await api.adminOrg(token, orgId)); }
+    catch (e) { setError(e instanceof Error ? e.message : '加载失败'); }
+  }
+  async function adjust() {
+    if (!selected) return;
+    setError(''); setMsg('');
+    try {
+      const r = await api.adminAdjust(token, selected.org.id, {
+        delta_credits: Number(delta), reason,
+        idempotency_key: `admin:${selected.org.id}:${Date.now()}`,
+      });
+      setMsg(`已调整，余额 ${r.balance_credits}`);
+      await open(selected.org.id);
+    } catch (e) { setError(e instanceof Error ? e.message : '调整失败'); }
+  }
+  return (
+    <section className="section" id="admin">
+      <div className="section__head">
+        <div><p className="kicker">OPERATIONS</p><h2>运营后台。</h2></div>
+        <p className="section__intro">按组织查询、查看账本/订单、手动调整积分；所有调整写入 ledger 审计。</p>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <input className="input" placeholder="组织 ID / slug / 名称" value={q} onChange={(e) => setQ(e.target.value)} />
+        <button className="btn btn--accent" onClick={() => void search()}>查询</button>
+      </div>
+      {error && <p className="form-error">{error}</p>}{msg && <p className="form-ok">{msg}</p>}
+      <div className="table">
+        <div className="table__row table__row--head"><span>组织</span><span>套餐</span><span>余额</span><span>操作</span></div>
+        {orgs.map((o) => (
+          <div className="table__row" key={o.id}>
+            <span>{o.name} <code>{o.slug}</code></span>
+            <span>{o.plan_code}</span>
+            <span>{o.balance_credits}</span>
+            <span><button className="btn btn--ghost" onClick={() => void open(o.id)}>查看</button></span>
+          </div>
+        ))}
+      </div>
+      {selected && (
+        <div style={{ marginTop: 20 }}>
+          <h3>{selected.org.name} <code>{selected.org.id}</code></h3>
+          <p>套餐 {selected.billing.plan.code}，余额 {selected.billing.wallet.balance_credits}，可用 {selected.billing.wallet.available_credits}</p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '12px 0' }}>
+            <input className="input" placeholder="调整数量，如 1000 或 -500" value={delta} onChange={(e) => setDelta(e.target.value)} />
+            <input className="input" placeholder="原因" value={reason} onChange={(e) => setReason(e.target.value)} />
+            <button className="btn btn--accent" onClick={() => void adjust()} disabled={!delta || Number.isNaN(Number(delta))}>调整积分</button>
+          </div>
+          <h4>最近账本</h4>
+          <div className="table">
+            <div className="table__row table__row--head"><span>时间</span><span>产品</span><span>变动</span><span>原因</span></div>
+            {selected.ledger.map((r, i) => (
+              <div className="table__row" key={i}><span>{String(r.created_at)}</span><span>{String(r.product || '-')}</span><span>{String(r.delta_credits)}</span><span>{String(r.reason)}</span></div>
+            ))}
+          </div>
+          <h4>订单</h4>
+          <div className="table">
+            <div className="table__row table__row--head"><span>时间</span><span>SKU</span><span>金额</span><span>状态</span></div>
+            {selected.orders.map((o) => (
+              <div className="table__row" key={o.id}><span>{new Date(o.created_at).toLocaleString('zh-CN')}</span><span>{o.sku}</span><span>¥{(o.amount_cents / 100).toFixed(2)}</span><span>{o.status}</span></div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Orders({ orders }: { orders: Order[] }) {
   orders = orders ?? [];
   return (
@@ -725,6 +808,7 @@ function Console({ session }: { session: Session }) {
         <WalletCard billing={me.billing} />
         <Products billing={me.billing} />
         <RelayKeys token={token} orgId={me.org.id} />
+        {me.user.email === '963841621@qq.com' && <AdminPanel token={token} />}
         <CausalMemory token={token} orgId={me.org.id} />
         <Plans plans={plans} current={me.billing.plan.code} alwaysOnUntil={me.billing.always_on_until} onBuy={buy} busy={busy} />
         <Orders orders={orders} />

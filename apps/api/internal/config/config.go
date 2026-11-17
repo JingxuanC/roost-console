@@ -22,6 +22,7 @@ type Config struct {
 	XunhuNotifyURL    string
 	XunhuReturnURL    string
 	Environment       string
+	AdminEmails       []string
 	RatePaymentNotify int
 	RateOIDCToken     int
 	RateProductToken  int
@@ -73,6 +74,7 @@ func Load() Config {
 		RatePaymentNotify: getInt("RATE_PAYMENT_NOTIFY_PER_MIN", 120),
 		RateOIDCToken:     getInt("RATE_OIDC_TOKEN_PER_MIN", 60),
 		RateProductToken:  getInt("RATE_PRODUCT_TOKEN_PER_MIN", 5),
+		AdminEmails:       splitCSV(get("ADMIN_EMAILS", "")),
 		OIDCIssuer:        strings.TrimRight(get("OIDC_ISSUER", "https://www.roostbots.com/console-api"), "/"),
 		OIDCClientID:      get("OIDC_CLIENT_ID", "roostbot"),
 		OIDCClientSecret:  get("OIDC_CLIENT_SECRET", ""),
@@ -101,4 +103,16 @@ func getInt(k string, d int) int {
 
 func (c Config) PaymentConfigured() bool {
 	return c.XunhuAppID != "" && c.XunhuAppSecret != ""
+}
+
+// splitCSV parses a comma separated environment value, trimming blanks.
+func splitCSV(raw string) []string {
+	out := make([]string, 0)
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, strings.ToLower(part))
+		}
+	}
+	return out
 }

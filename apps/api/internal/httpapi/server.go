@@ -99,6 +99,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/orgs/{orgID}/products/{product}/tokens", s.withUser(s.listProductTokens))
 	mux.HandleFunc("DELETE /v1/orgs/{orgID}/products/{product}/tokens/{tokenHash}", s.withUser(s.revokeProductToken))
 	mux.HandleFunc("POST /internal/v1/products/{product}/tokens", s.withService(s.internalProductTokens))
+	// Internal operations (admin allowlist by email).
+	mux.HandleFunc("GET /v1/admin/orgs", s.withUser(s.adminOnly(s.adminSearchOrgs)))
+	mux.HandleFunc("GET /v1/admin/orgs/{orgID}", s.withUser(s.adminOnly(s.adminGetOrg)))
+	mux.HandleFunc("POST /v1/admin/orgs/{orgID}/credits", s.withUser(s.adminOnly(s.adminAdjustCredits)))
+	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/ledger", s.withUser(s.adminOnly(s.adminLedger)))
+	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/orders", s.withUser(s.adminOnly(s.adminOrders)))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/billing", s.withUser(s.billingView))
 	mux.HandleFunc("GET /v1/billing/orders", s.withUser(s.listOrders))
 	mux.HandleFunc("POST /v1/billing/orders", s.withUser(s.createOrder))

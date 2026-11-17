@@ -76,6 +76,17 @@ export interface RelayKey {
   revoked_at?: string | null;
 }
 
+export interface AdminOrg {
+  id: string;
+  name: string;
+  slug: string;
+  plan_code: string;
+  owner_user_id: string;
+  balance_credits: number;
+  reserved_credits: number;
+  created_at: string;
+}
+
 export const api = {
   me: (token: string) => request<MeResponse>('/v1/me', token),
   plans: (token: string) => request<{ plans: Plan[] }>('/v1/billing/plans', token),
@@ -84,6 +95,12 @@ export const api = {
   getOrder: (token: string, id: string) => request<{ order: Order }>(`/v1/billing/orders/${id}`, token),
   devPay: (token: string, id: string) => request<{ ok: boolean }>(`/v1/dev/orders/${id}/pay`, token, { method: 'POST' }),
   orders: (token: string) => request<{ orders: Order[] }>('/v1/billing/orders', token),
+  adminOrgs: (token: string, q: string) =>
+    request<{ orgs: AdminOrg[] }>(`/v1/admin/orgs?q=${encodeURIComponent(q)}`, token),
+  adminOrg: (token: string, orgId: string) =>
+    request<{ org: AdminOrg; billing: BillingView; ledger: Array<Record<string, unknown>>; orders: Order[] }>(`/v1/admin/orgs/${orgId}`, token),
+  adminAdjust: (token: string, orgId: string, body: { delta_credits: number; reason: string; idempotency_key: string }) =>
+    request<{ ok: boolean; balance_credits: number }>(`/v1/admin/orgs/${orgId}/credits`, token, { method: 'POST', body: JSON.stringify(body) }),
   relayKeys: (token: string, orgId: string) =>
     request<{ tokens: RelayKey[] }>(`/v1/orgs/${orgId}/products/relay/tokens`, token),
   createRelayKey: (token: string, orgId: string) =>
