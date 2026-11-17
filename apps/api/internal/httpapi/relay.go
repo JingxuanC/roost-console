@@ -11,6 +11,18 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/billing"
 )
 
+// RelayMilliPerCredit is the relay's minor unit: 1000 minor units = 1 credit.
+// The relay estimates and settles in milli-credits so short requests are not
+// rounded to a free call; the console stores whole credits.
+const RelayMilliPerCredit = 1000
+
+func relayCreditsFromMinor(minor int64) int64 {
+	if minor <= 0 {
+		return 0
+	}
+	return (minor + RelayMilliPerCredit - 1) / RelayMilliPerCredit
+}
+
 // Relay endpoints implement the platform side of the relay-aggregator
 // contract: introspect a downstream rk- key, hold a request's estimated spend,
 // settle actual usage, release unspent holds and answer idempotency queries.
@@ -44,7 +56,7 @@ func (s *Server) relayIntrospect(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"subject_ref":   orgID,
-		"balance_minor": balance,
+		"balance_minor": balance * RelayMilliPerCredit,
 		"currency":      billing.RelayCurrency,
 		"as_of":         time.Now().UTC().Format(time.RFC3339),
 	})
@@ -71,7 +83,7 @@ func (s *Server) relayReserve(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, http.StatusBadRequest, "currency_mismatch", "unsupported currency")
 		return
 	}
-	reservation, err := s.store.RelayReserve(r.Context(), req.SubjectRef, req.RequestID, req.AmountMinor, req.Currency, time.Duration(req.TTLSeconds)*time.Second)
+	reservation, err := s.store.RelayReserve(r.Context(), req.SubjectRef, req.RequestID, relayCreditsFromMinor(req.AmountMinor), req.Currency, time.Duration(req.TTLSeconds)*time.Second)
 	if err != nil {
 		relayStoreError(w, err)
 		return
@@ -103,7 +115,7 @@ func (s *Server) relaySettle(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, http.StatusBadRequest, "currency_mismatch", "unsupported currency")
 		return
 	}
-	op, err := s.store.RelaySettle(r.Context(), r.PathValue("reservationID"), req.IdempotencyKey, req.AmountMinor)
+	op, err := s.store.RelaySettle(r.Context(), r.PathValue("reservationID"), req.IdempotencyKey, relayCreditsFromMinor(req.AmountMinor))
 	if err != nil {
 		relayStoreError(w, err)
 		return
@@ -139,7 +151,7 @@ func relayOperationBody(op billing.RelayOperation) map[string]any {
 		"operation":      op.Operation,
 		"status":         op.Status,
 		"reservation_id": op.ReservationID,
-		"amount_minor":   op.Amount,
+		"amount_minor":   op.Amount * RelayMilliPerCredit,
 		"error_code":     op.ErrorCode,
 	}
 }
