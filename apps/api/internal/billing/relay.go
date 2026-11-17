@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Relay billing surface. The relay forwards model traffic and keeps its own
@@ -68,6 +69,12 @@ func (s *Store) RelayBalance(ctx context.Context, orgID string) (int64, error) {
 
 // RelayReserve holds the request's estimated spend. Replaying the same request
 // returns the first hold; a different amount on the same run_ref is a conflict.
+//
+// It deliberately avoids an explicit transaction and advisory locks: the lease
+// row is the idempotency record (unique org+product+run_ref) and one CTE both
+// reserves the wallet and inserts the lease atomically. This keeps the
+// pre-forwarding hop to two database round trips, which matters because this
+// call sits on the request's first-token latency path.
 func (s *Store) RelayReserve(ctx context.Context, orgID, requestID string, amount int64, currency string, ttl time.Duration) (RelayReservation, error) {
 	if amount < 0 {
 		return RelayReservation{}, errors.New("relay: reserve amount must be >= 0")
@@ -75,52 +82,63 @@ func (s *Store) RelayReserve(ctx context.Context, orgID, requestID string, amoun
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return RelayReservation{}, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "wallet:"+orgID); err != nil {
-		return RelayReservation{}, err
-	}
+	// Replay/conflict check.
 	var existing RelayReservation
 	var status string
-	err = tx.QueryRow(ctx, `
+	err := s.Pool.QueryRow(ctx, `
 		select id,reserved_credits,status,expires_at from billing.usage_leases
-		where org_id=$1 and product='relay' and run_ref=$2 for update`, orgID, requestID).
+		where org_id=$1 and product='relay' and run_ref=$2`, orgID, requestID).
 		Scan(&existing.ID, &existing.Amount, &status, &existing.ExpiresAt)
 	if err == nil {
-		if existing.Amount != amount {
+		if existing.Amount != amount || status != "active" {
 			return RelayReservation{}, ErrRelayConflict
 		}
-		// A finished hold is still the first result of this idempotency key.
-		if status != "active" {
-			return RelayReservation{}, ErrRelayConflict
-		}
-		return existing, tx.Commit(ctx)
+		return existing, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return RelayReservation{}, err
 	}
-	var balance, reserved int64
-	if err := tx.QueryRow(ctx, `select balance_credits,reserved_credits from billing.wallets where org_id=$1 for update`, orgID).Scan(&balance, &reserved); err != nil {
-		return RelayReservation{}, err
+
+	var out RelayReservation
+	var updated int64
+	err = s.Pool.QueryRow(ctx, `
+		with upd as (
+			update billing.wallets
+			set reserved_credits=reserved_credits+$3, version=version+1, updated_at=now()
+			where org_id=$1 and balance_credits-reserved_credits >= $3
+			returning balance_credits
+		), ins as (
+			insert into billing.usage_leases (org_id,product,run_ref,reserved_credits,status,expires_at)
+			select $1,'relay',$2,$3,'active',now()+make_interval(secs=>$4)
+			where exists (select 1 from upd)
+			returning id,reserved_credits,expires_at
+		)
+		select id,reserved_credits,expires_at,(select count(*) from upd) from ins`,
+		orgID, requestID, amount, int(ttl.Seconds())).
+		Scan(&out.ID, &out.Amount, &out.ExpiresAt, &updated)
+	if err == nil {
+		return out, nil
 	}
-	if balance-reserved < amount {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		// A concurrent reserve won the unique key; return that hold.
+		var winner RelayReservation
+		if qerr := s.Pool.QueryRow(ctx, `
+			select id,reserved_credits,expires_at from billing.usage_leases
+			where org_id=$1 and product='relay' and run_ref=$2`, orgID, requestID).
+			Scan(&winner.ID, &winner.Amount, &winner.ExpiresAt); qerr == nil {
+			if winner.Amount != amount {
+				return RelayReservation{}, ErrRelayConflict
+			}
+			return winner, nil
+		}
+	}
+	if errors.Is(err, pgx.ErrNoRows) || updated == 0 {
+		// Either the wallet does not exist or the conditional update found no
+		// free balance; both are an insufficient-balance rejection.
 		return RelayReservation{}, ErrInsufficientCredits
 	}
-	var out RelayReservation
-	if err := tx.QueryRow(ctx, `
-		insert into billing.usage_leases (org_id,product,run_ref,reserved_credits,status,expires_at)
-		values ($1,'relay',$2,$3,'active',now()+make_interval(secs=>$4))
-		returning id,reserved_credits,expires_at`, orgID, requestID, amount, int(ttl.Seconds())).
-		Scan(&out.ID, &out.Amount, &out.ExpiresAt); err != nil {
-		return RelayReservation{}, err
-	}
-	if _, err := tx.Exec(ctx, `update billing.wallets set reserved_credits=reserved_credits+$2,version=version+1,updated_at=now() where org_id=$1`, orgID, amount); err != nil {
-		return RelayReservation{}, err
-	}
-	return out, tx.Commit(ctx)
+	return RelayReservation{}, err
 }
 
 // RelaySettle charges the reservation's actual spend exactly once, keyed by the
