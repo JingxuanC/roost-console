@@ -116,11 +116,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/billing/leases/acquire", s.withCompatService(s.compatAcquire))
 	mux.HandleFunc("POST /api/auth/billing/leases/release", s.withCompatService(s.compatRelease))
 	// Relay (API marketplace) platform contract.
-	mux.HandleFunc("POST /v1/relay/api-keys/introspect", s.withCompatService(s.relayIntrospect))
-	mux.HandleFunc("POST /v1/relay/reservations", s.withCompatService(s.relayReserve))
-	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/settle", s.withCompatService(s.relaySettle))
-	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/release", s.withCompatService(s.relayRelease))
-	mux.HandleFunc("GET /v1/relay/operations/{idempotencyKey}", s.withCompatService(s.relayOperation))
+	mux.HandleFunc("POST /v1/relay/api-keys/introspect", s.withRelayService(s.relayIntrospect))
+	mux.HandleFunc("POST /v1/relay/reservations", s.withRelayService(s.relayReserve))
+	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/settle", s.withRelayService(s.relaySettle))
+	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/release", s.withRelayService(s.relayRelease))
+	mux.HandleFunc("GET /v1/relay/operations/{idempotencyKey}", s.withRelayService(s.relayOperation))
 
 	mux.HandleFunc("POST /internal/v1/orgs/resolve-user", s.withService(s.resolveUserOrg))
 	mux.HandleFunc("POST /internal/v1/entitlements/resolve", s.withService(s.resolveEntitlement))

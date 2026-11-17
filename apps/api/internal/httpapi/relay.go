@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/JingxuanC/roost-console/apps/api/internal/billing"
@@ -173,4 +174,36 @@ func relayStoreError(w http.ResponseWriter, err error) {
 
 func writeRelayError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
+}
+
+// withRelayService authenticates the relay service itself. Unlike the dslpha
+// compatibility middleware it carries no user identity: the relay presents a
+// downstream API key, not a user session, and every relay endpoint resolves
+// its subject from that key or the reservation.
+func (s *Server) withRelayService(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeRelayError(w, http.StatusBadRequest, "bad_request", "could not read body")
+			return
+		}
+		service := "relay"
+		verified := s.verifyService(service, r, body)
+		if !verified {
+			legacy := r.Header.Get("X-Service-Token")
+			if s.verifyLegacyServiceToken(service, legacy) {
+				verified = true
+			}
+		}
+		if !verified {
+			writeRelayError(w, http.StatusUnauthorized, "unauthorized", "bad service signature")
+			return
+		}
+		if !serviceAllows(service, r.Method, r.URL.Path) {
+			writeRelayError(w, http.StatusForbidden, "forbidden", "service scope does not allow this endpoint")
+			return
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		next(w, r)
+	}
 }
