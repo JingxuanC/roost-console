@@ -10,9 +10,9 @@ const PRODUCT_LABELS: Record<string, string> = {
 };
 
 const CREDIT_PACKS = [
-  { sku: 'credit_50', label: '5,000 credits', price: '¥50' },
-  { sku: 'credit_100', label: '10,000 credits', price: '¥100' },
-  { sku: 'credit_500', label: '50,000 credits', price: '¥500' },
+  { sku: 'token_50', label: '5,000 token 余额', price: '¥50', note: '≈ DeepSeek V4-Pro 25M / Opus 5.5 5.5M 输入 tokens' },
+  { sku: 'token_100', label: '10,000 token 余额', price: '¥100', note: '≈ DeepSeek V4-Pro 50M / Opus 5.5 11M 输入 tokens' },
+  { sku: 'token_500', label: '50,000 token 余额', price: '¥500', note: '≈ DeepSeek V4-Pro 252M / Opus 5.5 55M 输入 tokens' },
 ];
 
 const WORKSPACES = [
@@ -373,6 +373,7 @@ function Plans({ plans, current, alwaysOnUntil, onBuy, busy }: { plans: Plan[]; 
           <button key={pack.sku} className="pack" disabled={busy === pack.sku} onClick={() => onBuy(pack.sku)}>
             <span>{pack.label}</span>
             <strong>{pack.price}</strong>
+            <span style={{ display: 'block', fontSize: 11, opacity: 0.65, marginTop: 4 }}>{pack.note}</span>
           </button>
         ))}
         {(current === 'pro' || current === 'max') && (

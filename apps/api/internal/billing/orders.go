@@ -29,7 +29,11 @@ var CreditPacks = map[string]CreditPack{
 	"credit_50":  {"credit_50", 5000, 5000, "Roost 5,000 credits"},
 	"credit_100": {"credit_100", 10000, 10000, "Roost 10,000 credits"},
 	"credit_500": {"credit_500", 50000, 50000, "Roost 50,000 credits"},
-	AlwaysOnSKU:  {AlwaysOnSKU, 4900, 0, "Roost Always-on · 30 days"},
+	// Token packs are the same credit balance, sold under a token-first name.
+	"token_50":  {"token_50", 5000, 5000, "Roost 5,000 token credits"},
+	"token_100": {"token_100", 10000, 10000, "Roost 10,000 token credits"},
+	"token_500": {"token_500", 50000, 50000, "Roost 50,000 token credits"},
+	AlwaysOnSKU: {AlwaysOnSKU, 4900, 0, "Roost Always-on · 30 days"},
 }
 
 func randomTradeNo() string {
