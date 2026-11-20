@@ -30,10 +30,10 @@ type Client struct {
 }
 
 type CreateInput struct {
-	OutTradeNo string
+	OutTradeNo  string
 	AmountCents int
-	Title      string
-	Attach     string
+	Title       string
+	Attach      string
 }
 
 type CreateResult struct {

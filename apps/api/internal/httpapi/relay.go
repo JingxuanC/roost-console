@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,6 +17,18 @@ import (
 // rounded to a free call; the console stores whole credits.
 const RelayMilliPerCredit = 1000
 
+// relayBilling is the slice of the billing store used by relay handlers. It is
+// an interface so handler tests can exercise the API without Postgres.
+type relayBilling interface {
+	RelayAPIKey(ctx context.Context, token string) (billing.RelayIdentity, error)
+	RelayBalance(ctx context.Context, orgID string) (int64, error)
+	RelayReserve(ctx context.Context, orgID, requestID string, amount int64, currency string, ttl time.Duration) (billing.RelayReservation, error)
+	RelaySettleWithDetails(ctx context.Context, reservationID, settlementID, idempotencyKey string, amount int64, toolCharges []billing.ToolCharge, compression *billing.Compression, usage *billing.UsageEvent) (billing.RelayOperation, error)
+	RelayRelease(ctx context.Context, reservationID string) (billing.RelayOperation, error)
+	RelayOperation(ctx context.Context, idempotencyKey string) (billing.RelayOperation, error)
+	RelayToolCharges(ctx context.Context, reservationID string) ([]billing.ToolCharge, error)
+}
+
 func relayCreditsFromMinor(minor int64) int64 {
 	if minor <= 0 {
 		return 0
@@ -29,6 +42,16 @@ func relayCreditsFromMinor(minor int64) int64 {
 // Every route is service-authenticated; the same secret may arrive as the
 // signed service headers or as the legacy X-Service-Token header.
 
+func (s *Server) relayStore() relayBilling {
+	if s.relay != nil {
+		return s.relay
+	}
+	if s.store == nil {
+		return nil
+	}
+	return s.store
+}
+
 func (s *Server) relayIntrospect(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		APIKey string `json:"api_key"`
@@ -40,7 +63,7 @@ func (s *Server) relayIntrospect(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, http.StatusBadRequest, "invalid_request", "api_key is required")
 		return
 	}
-	orgID, err := s.store.RelayAPIKey(r.Context(), req.APIKey)
+	identity, err := s.relayStore().RelayAPIKey(r.Context(), req.APIKey)
 	if err != nil {
 		if errors.Is(err, billing.ErrRelayNotFound) {
 			writeRelayError(w, http.StatusUnauthorized, "unauthorized", "invalid api key")
@@ -49,13 +72,18 @@ func (s *Server) relayIntrospect(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	balance, err := s.store.RelayBalance(r.Context(), orgID)
+	balance, err := s.relayStore().RelayBalance(r.Context(), identity.OrgID)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
+	// subject_ref stays the org id (the billing tenant) for backward
+	// compatibility. user_id is the issuing console user and is "" for legacy
+	// tokens issued before user binding; the relay must fall back to
+	// org-scoped behavior in that case.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"subject_ref":   orgID,
+		"subject_ref":   identity.OrgID,
+		"user_id":       identity.UserID,
 		"balance_minor": balance * RelayMilliPerCredit,
 		"currency":      billing.RelayCurrency,
 		"as_of":         time.Now().UTC().Format(time.RFC3339),
@@ -83,7 +111,7 @@ func (s *Server) relayReserve(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, http.StatusBadRequest, "currency_mismatch", "unsupported currency")
 		return
 	}
-	reservation, err := s.store.RelayReserve(r.Context(), req.SubjectRef, req.RequestID, relayCreditsFromMinor(req.AmountMinor), req.Currency, time.Duration(req.TTLSeconds)*time.Second)
+	reservation, err := s.relayStore().RelayReserve(r.Context(), req.SubjectRef, req.RequestID, relayCreditsFromMinor(req.AmountMinor), req.Currency, time.Duration(req.TTLSeconds)*time.Second)
 	if err != nil {
 		relayStoreError(w, err)
 		return
@@ -98,11 +126,14 @@ func (s *Server) relayReserve(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) relaySettle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SettlementID   string `json:"settlement_id"`
-		IdempotencyKey string `json:"idempotency_key"`
-		AmountMinor    int64  `json:"amount_minor"`
-		Currency       string `json:"currency"`
-		UsageStatus    string `json:"usage_status"`
+		SettlementID   string               `json:"settlement_id"`
+		IdempotencyKey string               `json:"idempotency_key"`
+		AmountMinor    int64                `json:"amount_minor"`
+		Currency       string               `json:"currency"`
+		UsageStatus    string               `json:"usage_status"`
+		ToolCharges    []billing.ToolCharge `json:"tool_charges"`
+		Compression    *billing.Compression `json:"compression"`
+		Usage          *billing.UsageEvent  `json:"usage"`
 	}
 	if !decodeRelayBody(w, r, &req) {
 		return
@@ -115,7 +146,28 @@ func (s *Server) relaySettle(w http.ResponseWriter, r *http.Request) {
 		writeRelayError(w, http.StatusBadRequest, "currency_mismatch", "unsupported currency")
 		return
 	}
-	op, err := s.store.RelaySettle(r.Context(), r.PathValue("reservationID"), req.IdempotencyKey, relayCreditsFromMinor(req.AmountMinor))
+	// Validate the complete breakdown before touching the store: a malformed
+	// entry must not book a settlement (or partially persist tool charges).
+	charges, err := billing.NormalizeToolCharges(req.ToolCharges)
+	if err != nil {
+		writeRelayError(w, http.StatusBadRequest, "invalid_tool_charges", err.Error())
+		return
+	}
+	// Compression is optional. A malformed object is rejected before the store
+	// for the same reason; absent or all-zero savings produce no row.
+	compression, err := billing.NormalizeCompression(req.Compression)
+	if err != nil {
+		writeRelayError(w, http.StatusBadRequest, "invalid_compression", err.Error())
+		return
+	}
+	// Usage is optional too. Validate the complete object before booking so a
+	// malformed counter never leaves a settlement without its usage row.
+	usage, err := billing.NormalizeUsage(req.Usage)
+	if err != nil {
+		writeRelayError(w, http.StatusBadRequest, "invalid_usage", err.Error())
+		return
+	}
+	op, err := s.relayStore().RelaySettleWithDetails(r.Context(), r.PathValue("reservationID"), req.SettlementID, req.IdempotencyKey, relayCreditsFromMinor(req.AmountMinor), charges, compression, usage)
 	if err != nil {
 		relayStoreError(w, err)
 		return
@@ -124,7 +176,7 @@ func (s *Server) relaySettle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) relayRelease(w http.ResponseWriter, r *http.Request) {
-	op, err := s.store.RelayRelease(r.Context(), r.PathValue("reservationID"))
+	op, err := s.relayStore().RelayRelease(r.Context(), r.PathValue("reservationID"))
 	if err != nil {
 		relayStoreError(w, err)
 		return
@@ -133,7 +185,7 @@ func (s *Server) relayRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) relayOperation(w http.ResponseWriter, r *http.Request) {
-	op, err := s.store.RelayOperation(r.Context(), r.PathValue("idempotencyKey"))
+	op, err := s.relayStore().RelayOperation(r.Context(), r.PathValue("idempotencyKey"))
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -145,14 +197,51 @@ func (s *Server) relayOperation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, relayOperationBody(op))
 }
 
-func relayOperationBody(op billing.RelayOperation) map[string]any {
+// relayReservationToolCharges exposes a reservation's persisted breakdown
+// directly, for reporting without replaying the settle idempotency key.
+func (s *Server) relayReservationToolCharges(w http.ResponseWriter, r *http.Request) {
+	reservationID := r.PathValue("reservationID")
+	charges, err := s.relayStore().RelayToolCharges(r.Context(), reservationID)
+	if err != nil {
+		relayStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, relayToolChargesBody(reservationID, charges))
+}
+
+func relayToolChargesBody(reservationID string, charges []billing.ToolCharge) map[string]any {
+	if charges == nil {
+		charges = []billing.ToolCharge{}
+	}
+	totals := billing.SumToolCharges(charges)
 	return map[string]any{
-		"found":          op.Found,
-		"operation":      op.Operation,
-		"status":         op.Status,
-		"reservation_id": op.ReservationID,
-		"amount_minor":   op.Amount * RelayMilliPerCredit,
-		"error_code":     op.ErrorCode,
+		"reservation_id":                   reservationID,
+		"tool_charges":                     charges,
+		"tool_charges_total":               totals,
+		"tool_charges_amount_minor":        totals.AmountMinor,
+		"tool_charges_provider_cost_micro": totals.ProviderCostMicro,
+	}
+}
+
+func relayOperationBody(op billing.RelayOperation) map[string]any {
+	charges := op.ToolCharges
+	if charges == nil {
+		charges = []billing.ToolCharge{}
+	}
+	totals := billing.SumToolCharges(charges)
+	return map[string]any{
+		"found":                            op.Found,
+		"operation":                        op.Operation,
+		"status":                           op.Status,
+		"reservation_id":                   op.ReservationID,
+		"amount_minor":                     op.Amount * RelayMilliPerCredit,
+		"error_code":                       op.ErrorCode,
+		"tool_charges":                     charges,
+		"tool_charges_total":               totals,
+		"tool_charges_amount_minor":        totals.AmountMinor,
+		"tool_charges_provider_cost_micro": totals.ProviderCostMicro,
+		"compression":                      op.Compression,
+		"usage":                            op.Usage,
 	}
 }
 
@@ -179,6 +268,12 @@ func relayStoreError(w http.ResponseWriter, err error) {
 		writeRelayError(w, http.StatusNotFound, "not_found", "reservation not found")
 	case errors.Is(err, billing.ErrRelayReleased):
 		writeRelayError(w, http.StatusConflict, "reservation_released", "reservation already released")
+	case errors.Is(err, billing.ErrInvalidToolCharges):
+		writeRelayError(w, http.StatusBadRequest, "invalid_tool_charges", err.Error())
+	case errors.Is(err, billing.ErrInvalidCompression):
+		writeRelayError(w, http.StatusBadRequest, "invalid_compression", err.Error())
+	case errors.Is(err, billing.ErrInvalidUsage):
+		writeRelayError(w, http.StatusBadRequest, "invalid_usage", err.Error())
 	default:
 		writeRelayError(w, http.StatusInternalServerError, "internal_error", "internal error")
 	}

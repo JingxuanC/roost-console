@@ -44,10 +44,12 @@ market
   /internal/v1/orgs/resolve-user
   /internal/v1/entitlements/resolve
   /internal/v1/usage/leases*        reserve / draw / settle / release
+  /internal/v1/usage/sandbox        sandbox seconds + credits report
 
 dslpha
   /api/auth/validate
   /api/auth/billing/leases*         compat lease
+  /internal/v1/usage/sandbox        sandbox seconds + credits report
 
 causal
   /internal/v1/usage/charge         call charge

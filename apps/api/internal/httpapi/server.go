@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -47,8 +48,17 @@ type Server struct {
 
 	// Test seams. New() wires both to store; production paths fall back to
 	// store when the fields are nil.
-	membership    orgMembership
-	productTokens productTokenAdmin
+	membership     orgMembership
+	productTokens  productTokenAdmin
+	relay          relayBilling
+	compression    compressionUsageStore
+	usage          usageAnalyticsStore
+	overview       adminOverviewStore
+	sandboxUsage   sandboxUsageRecorder
+	billingDetails billingDetailsStore
+	referrals      referralBilling
+	adminGift      adminGiftBilling
+	adminReferral  adminReferralBilling
 
 	// Public path prefixes this deployment is mounted under (e.g. "/console-api"
 	// behind the nginx prefix strip). First-party clients sign the public path;
@@ -70,6 +80,15 @@ func New(cfg config.Config, store *billing.Store, verifier *auth.Verifier, pay *
 	if store != nil {
 		s.membership = store
 		s.productTokens = store
+		s.relay = store
+		s.compression = store
+		s.usage = store
+		s.overview = store
+		s.sandboxUsage = store
+		s.billingDetails = store
+		s.referrals = store
+		s.adminGift = store
+		s.adminReferral = store
 	}
 	return s
 }
@@ -100,12 +119,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/orgs/{orgID}/products/{product}/tokens/{tokenHash}", s.withUser(s.revokeProductToken))
 	mux.HandleFunc("POST /internal/v1/products/{product}/tokens", s.withService(s.internalProductTokens))
 	// Internal operations (admin allowlist by email).
+	mux.HandleFunc("GET /v1/admin/overview", s.withUser(s.adminOnly(s.adminOverview)))
 	mux.HandleFunc("GET /v1/admin/orgs", s.withUser(s.adminOnly(s.adminSearchOrgs)))
 	mux.HandleFunc("GET /v1/admin/orgs/{orgID}", s.withUser(s.adminOnly(s.adminGetOrg)))
 	mux.HandleFunc("POST /v1/admin/orgs/{orgID}/credits", s.withUser(s.adminOnly(s.adminAdjustCredits)))
+	mux.HandleFunc("POST /v1/admin/orgs/{orgID}/gift", s.withUser(s.adminOnly(s.adminGiftCredits)))
 	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/ledger", s.withUser(s.adminOnly(s.adminLedger)))
 	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/orders", s.withUser(s.adminOnly(s.adminOrders)))
+	mux.HandleFunc("GET /v1/admin/referrals", s.withUser(s.adminOnly(s.adminReferrals)))
+	// Referral program (user session; code creation is owner-only).
+	mux.HandleFunc("GET /v1/referral", s.withUser(s.referralOverview))
+	mux.HandleFunc("POST /v1/referral/claim", s.withUser(s.rateLimit("referral_claim", s.cfg.RateReferralClaim, s.userKey, s.claimReferral)))
 	mux.HandleFunc("GET /v1/orgs/{orgID}/billing", s.withUser(s.billingView))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/billing/compression", s.withUser(s.orgCompressionUsage))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/billing/details", s.withUser(s.orgBillingDetails))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/usage/summary", s.withUser(s.orgUsageSummary))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/usage/daily", s.withUser(s.orgUsageDaily))
+	mux.HandleFunc("GET /v1/orgs/{orgID}/usage/recent", s.withUser(s.orgUsageRecent))
 	mux.HandleFunc("GET /v1/billing/orders", s.withUser(s.listOrders))
 	mux.HandleFunc("POST /v1/billing/orders", s.withUser(s.createOrder))
 	mux.HandleFunc("GET /v1/billing/orders/{orderID}", s.withUser(s.getOrder))
@@ -126,6 +156,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/relay/reservations", s.withRelayService(s.relayReserve))
 	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/settle", s.withRelayService(s.relaySettle))
 	mux.HandleFunc("POST /v1/relay/reservations/{reservationID}/release", s.withRelayService(s.relayRelease))
+	mux.HandleFunc("GET /v1/relay/reservations/{reservationID}/tool-charges", s.withRelayService(s.relayReservationToolCharges))
 	mux.HandleFunc("GET /v1/relay/operations/{idempotencyKey}", s.withRelayService(s.relayOperation))
 
 	mux.HandleFunc("POST /internal/v1/orgs/resolve-user", s.withService(s.resolveUserOrg))
@@ -135,6 +166,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/release", s.withService(s.releaseByRun))
 	mux.HandleFunc("POST /internal/v1/usage/leases/by-run/draw", s.withService(s.drawByRun))
 	mux.HandleFunc("POST /internal/v1/usage/charge", s.withService(s.charge))
+	mux.HandleFunc("POST /internal/v1/usage/sandbox", s.withService(s.recordSandboxUsage))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/settle", s.withService(s.settle))
 	mux.HandleFunc("POST /internal/v1/usage/leases/{leaseID}/release", s.withService(s.release))
 	return s.cors(mux)
@@ -311,14 +343,17 @@ var serviceScopes = map[string][]string{
 		"/internal/v1/orgs/resolve-user",
 		"/internal/v1/entitlements/resolve",
 		"/internal/v1/usage/leases",
+		"/internal/v1/usage/sandbox",
 	},
 	"dslpha": {
 		"/api/auth/validate",
 		"/api/auth/billing/leases",
+		"/internal/v1/orgs/resolve-user",
+		"/internal/v1/usage/sandbox",
 	},
 	"causal":      {"/internal/v1/usage/charge"},
-	"relay":       {"/v1/relay/"},
 	"causal-sync": {"/internal/v1/products/causal-memory/tokens"},
+	"relay":       {"/v1/relay/", "/internal/v1/products/causal-memory/tokens"},
 	"root":        {"*"},
 }
 
@@ -363,10 +398,20 @@ func (s *Server) issueProductToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_product", "token issuance is only available for causal-memory and relay")
 		return
 	}
-	token, meta, err := s.store.IssueProductToken(r.Context(), orgID, product)
+	// The route requires a user session, so every token issued here is bound to
+	// the authenticated user. Legacy tokens (created before user binding) keep a
+	// nil created_by_user_id and remain org-scoped.
+	userID := ""
+	if u := userFrom(r); u != nil {
+		userID = u.ID
+	}
+	token, meta, err := s.store.IssueProductToken(r.Context(), orgID, product, userID)
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	if product == "causal-memory" {
+		s.pushCausalToken(r.Context(), meta.TokenHash, orgID)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token": token, "token_hash": meta.TokenHash, "org_id": orgID, "product": product,
@@ -436,12 +481,98 @@ func (s *Server) internalProductTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported_product", "unsupported product")
 		return
 	}
+	if r.Method == http.MethodPost {
+		// Relay-scoped issuance: the relay needs an org memory token to call
+		// causal-memory on the user's behalf. The token is returned once and
+		// never stored raw; the relay caches it per org and must not log it.
+		var req struct {
+			OrgID string `json:"org_id"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid body")
+			return
+		}
+		orgID := strings.TrimSpace(req.OrgID)
+		// causal-sync polls with an empty body to fetch the hash list (the
+		// legacy POST shape); only relay-scoped calls ask for issuance.
+		if orgID == "" && strings.TrimSpace(r.Header.Get("X-Roost-Service")) == "causal-sync" {
+			tokens, err := s.store.ListAllProductTokens(r.Context(), product)
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+			return
+		}
+		if orgID == "" {
+			writeError(w, http.StatusBadRequest, "bad_request", "org_id is required")
+			return
+		}
+		// Service-authenticated issuance has no console user session: store
+		// NULL, the same shape as a legacy org-scoped token.
+		token, meta, err := s.store.IssueProductToken(r.Context(), orgID, product, "")
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		s.pushCausalToken(r.Context(), meta.TokenHash, orgID)
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"token": token, "token_hash": meta.TokenHash, "org_id": orgID, "product": product,
+			"mcp_url": s.causalMemoryMCPURL(),
+		})
+		return
+	}
 	tokens, err := s.store.ListAllProductTokens(r.Context(), product)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tokens": tokens})
+}
+
+// pushCausalToken makes a newly issued causal-memory token usable immediately
+// instead of waiting for the 30s hash sync. The push is signed as causal-sync
+// and carries only the hash, never the raw token. Failure is non-fatal: the
+// periodic sync and the relay's 401 retry remain the fallback.
+func (s *Server) pushCausalToken(ctx context.Context, tokenHash, orgID string) {
+	url := strings.TrimSpace(s.cfg.MemoryTokenPushURL)
+	if url == "" || tokenHash == "" || orgID == "" {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"token_hash": tokenHash, "org_id": orgID})
+	if err != nil {
+		return
+	}
+	secret := ""
+	for _, candidate := range []string{"causal-sync", "causal"} {
+		if values := s.cfg.ServiceSecrets[candidate]; len(values) > 0 {
+			secret = values[0]
+			break
+		}
+	}
+	if secret == "" {
+		return
+	}
+	ts, nonce, sig := auth.SignService("causal-sync", http.MethodPost, "/__token", body, secret, time.Now())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Roost-Service", "causal-sync")
+	req.Header.Set("X-Roost-Timestamp", ts)
+	req.Header.Set("X-Roost-Nonce", nonce)
+	req.Header.Set("X-Roost-Signature", sig)
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.log.Warn("causal token push failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		s.log.Warn("causal token push rejected", "status", resp.StatusCode)
+	}
 }
 
 func (s *Server) causalMemoryMCPURL() string {
@@ -1119,6 +1250,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "product_disabled", "product is not enabled")
 	case errors.Is(err, billing.ErrAddonNotEligible):
 		writeError(w, http.StatusBadRequest, "addon_not_eligible", "the always-on add-on requires the Pro or Max plan")
+	case errors.Is(err, billing.ErrInvalidSandboxUsage):
+		writeError(w, http.StatusBadRequest, "invalid_sandbox_usage", err.Error())
 	default:
 		s.log.Error("api error", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")

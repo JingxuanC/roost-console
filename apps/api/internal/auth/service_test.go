@@ -19,29 +19,43 @@ func signedRequest(body []byte, secret string, now time.Time) *http.Request {
 func TestServiceSignature(t *testing.T) {
 	body := []byte(`{"org_id":"o"}`)
 	r := signedRequest(body, "secret", time.Now())
-	if !VerifyServiceSignature(r, body, "secret") { t.Fatal("valid signature rejected") }
-	if VerifyServiceSignature(r, body, "other") { t.Fatal("wrong secret accepted") }
+	if !VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("valid signature rejected")
+	}
+	if VerifyServiceSignature(r, body, "other") {
+		t.Fatal("wrong secret accepted")
+	}
 }
 
 func TestServiceSignatureTamper(t *testing.T) {
 	body := []byte(`{"credits":1}`)
 	r := signedRequest(body, "secret", time.Now())
-	if VerifyServiceSignature(r, []byte(`{"credits":999}`), "secret") { t.Fatal("body tamper accepted") }
+	if VerifyServiceSignature(r, []byte(`{"credits":999}`), "secret") {
+		t.Fatal("body tamper accepted")
+	}
 	r.URL.Path = "/other"
-	if VerifyServiceSignature(r, body, "secret") { t.Fatal("path tamper accepted") }
+	if VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("path tamper accepted")
+	}
 }
 
 func TestServiceSignatureReplay(t *testing.T) {
 	body := []byte(`{}`)
 	r := signedRequest(body, "secret", time.Now())
-	if !VerifyServiceSignature(r, body, "secret") { t.Fatal("first rejected") }
-	if VerifyServiceSignature(r, body, "secret") { t.Fatal("replay accepted") }
+	if !VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("first rejected")
+	}
+	if VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("replay accepted")
+	}
 }
 
 func TestServiceSignatureSkew(t *testing.T) {
 	body := []byte(`{}`)
 	r := signedRequest(body, "secret", time.Now().Add(-10*time.Minute))
-	if VerifyServiceSignature(r, body, "secret") { t.Fatal("stale timestamp accepted") }
+	if VerifyServiceSignature(r, body, "secret") {
+		t.Fatal("stale timestamp accepted")
+	}
 }
 
 func TestServiceSignatureForPublicPath(t *testing.T) {

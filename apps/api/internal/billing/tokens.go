@@ -19,6 +19,10 @@ type ProductToken struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	// CreatedByUserID is the console user who issued the token. It is nil for
+	// tokens issued before user binding (legacy org-scoped tokens); readers
+	// must treat nil as "no user binding", never as a user id.
+	CreatedByUserID *string `json:"created_by_user_id,omitempty"`
 }
 
 func hashProductToken(token string) string {
@@ -26,7 +30,11 @@ func hashProductToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *Store) IssueProductToken(ctx context.Context, orgID, product string) (string, ProductToken, error) {
+// IssueProductToken mints a token for product in orgID and records the
+// authenticated console user that issued it. createdByUserID is empty for
+// service-authenticated issuance (no user session); the stored value is then
+// NULL, matching legacy tokens.
+func (s *Store) IssueProductToken(ctx context.Context, orgID, product, createdByUserID string) (string, ProductToken, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", ProductToken{}, err
@@ -38,15 +46,17 @@ func (s *Store) IssueProductToken(ctx context.Context, orgID, product string) (s
 	token := prefix + base64.RawURLEncoding.EncodeToString(raw)
 	var t ProductToken
 	err := s.Pool.QueryRow(ctx, `
-		insert into billing.product_tokens (token_hash,org_id,product)
-		values ($1,$2,$3) returning token_hash,org_id,product,created_at`,
-		hashProductToken(token), orgID, product).Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt)
+		insert into billing.product_tokens (token_hash,org_id,product,created_by_user_id)
+		values ($1,$2,$3,nullif($4,'')::uuid)
+		returning token_hash,org_id,product,created_at,created_by_user_id::text`,
+		hashProductToken(token), orgID, product, createdByUserID).
+		Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt, &t.CreatedByUserID)
 	return token, t, err
 }
 
 func (s *Store) ListProductTokens(ctx context.Context, orgID, product string) ([]ProductToken, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select token_hash,org_id,product,created_at,last_used_at,revoked_at
+		select token_hash,org_id,product,created_at,last_used_at,revoked_at,created_by_user_id::text
 		from billing.product_tokens
 		where org_id=$1 and product=$2 and revoked_at is null
 		order by created_at desc`, orgID, product)
@@ -57,7 +67,7 @@ func (s *Store) ListProductTokens(ctx context.Context, orgID, product string) ([
 	out := make([]ProductToken, 0)
 	for rows.Next() {
 		var t ProductToken
-		if err := rows.Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt, &t.LastUsedAt, &t.RevokedAt); err != nil {
+		if err := rows.Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt, &t.LastUsedAt, &t.RevokedAt, &t.CreatedByUserID); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -67,7 +77,7 @@ func (s *Store) ListProductTokens(ctx context.Context, orgID, product string) ([
 
 func (s *Store) ListAllProductTokens(ctx context.Context, product string) ([]ProductToken, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select token_hash,org_id,product,created_at,last_used_at
+		select token_hash,org_id,product,created_at,last_used_at,created_by_user_id::text
 		from billing.product_tokens
 		where product=$1 and revoked_at is null
 		order by created_at desc`, product)
@@ -78,7 +88,7 @@ func (s *Store) ListAllProductTokens(ctx context.Context, product string) ([]Pro
 	out := make([]ProductToken, 0)
 	for rows.Next() {
 		var t ProductToken
-		if err := rows.Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt, &t.LastUsedAt); err != nil {
+		if err := rows.Scan(&t.TokenHash, &t.OrgID, &t.Product, &t.CreatedAt, &t.LastUsedAt, &t.CreatedByUserID); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
