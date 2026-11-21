@@ -411,8 +411,11 @@ export interface UsageRecentResponse {
 export const api = {
   me: (token: string) => request<MeResponse>('/v1/me', token),
   plans: (token: string) => request<{ plans: Plan[] }>('/v1/billing/plans', token),
-  createOrder: (token: string, sku: string) =>
-    request<{ order: Order }>('/v1/billing/orders', token, { method: 'POST', body: JSON.stringify({ sku }) }),
+  createOrder: (token: string, sku: string, amountCents?: number) =>
+    request<{ order: Order }>('/v1/billing/orders', token, {
+      method: 'POST',
+      body: JSON.stringify(amountCents === undefined ? { sku } : { sku, amount_cents: amountCents }),
+    }),
   getOrder: (token: string, id: string) => request<{ order: Order }>(`/v1/billing/orders/${id}`, token),
   devPay: (token: string, id: string) => request<{ ok: boolean }>(`/v1/dev/orders/${id}/pay`, token, { method: 'POST' }),
   orders: (token: string) => request<{ orders: Order[] }>('/v1/billing/orders', token),

@@ -59,6 +59,47 @@ func (s *Store) Quote(ctx context.Context, sku string) (CreditPack, string, erro
 	return CreditPack{}, "", ErrNotFound
 }
 
+// Custom top-up: the user chooses the amount, and credits are 1:1 with cents
+// (100 credits = ¥1). The price is always derived server-side from the amount,
+// so a client cannot buy a different number of credits than it pays for.
+const (
+	CustomTopUpSKU      = "credit_custom"
+	CustomTopUpMinCents = 1000   // ¥10
+	CustomTopUpMaxCents = 500000 // ¥5000
+)
+
+var ErrInvalidTopUpAmount = errors.New("invalid top-up amount")
+
+// CustomTopUpQuote validates a custom amount and returns the pack it buys.
+func CustomTopUpQuote(amountCents int64) (CreditPack, error) {
+	if amountCents < CustomTopUpMinCents || amountCents > CustomTopUpMaxCents {
+		return CreditPack{}, ErrInvalidTopUpAmount
+	}
+	return CreditPack{
+		SKU:         CustomTopUpSKU,
+		AmountCents: int(amountCents),
+		Credits:     amountCents,
+		Title:       "Roost 自定义充值",
+	}, nil
+}
+
+// CreateCustomOrder persists a custom top-up before the provider checkout is
+// created, matching CreateOrder's lifecycle (created -> pending -> fulfilled).
+func (s *Store) CreateCustomOrder(ctx context.Context, orgID string, amountCents int64) (Order, error) {
+	pack, err := CustomTopUpQuote(amountCents)
+	if err != nil {
+		return Order{}, err
+	}
+	var o Order
+	err = s.Pool.QueryRow(ctx, `
+		insert into billing.orders (org_id,out_trade_no,sku,amount_cents,credits,status)
+		values ($1,$2,$3,$4,$5,'created')
+		returning id,org_id,out_trade_no,sku,amount_cents,credits,status,created_at`,
+		orgID, randomTradeNo(), pack.SKU, pack.AmountCents, pack.Credits,
+	).Scan(&o.ID, &o.OrgID, &o.OutTradeNo, &o.SKU, &o.AmountCents, &o.Credits, &o.Status, &o.CreatedAt)
+	return o, err
+}
+
 func (s *Store) CreateOrder(ctx context.Context, orgID, sku string) (Order, error) {
 	pack, kind, err := s.Quote(ctx, sku)
 	if err != nil {
