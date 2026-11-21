@@ -1350,7 +1350,7 @@ const ADMIN_SPEND_PRODUCTS: Array<{ key: string; field: AdminSpendField; label: 
   { key: 'relay', field: 'relay', label: 'Relay · 模型中转', short: 'Relay' },
   { key: 'market', field: 'market', label: 'Market · 算力市场', short: 'Market' },
   { key: 'causal-memory', field: 'causal-memory', label: 'Causal Memory · 记忆', short: 'Memory' },
-  { key: 'dslpha', field: 'dslpha', label: 'dsalpha · 投研工作台', short: 'dsalpha' },
+  { key: 'dsalpha', field: 'dslpha', label: 'dsalpha · 投研工作台', short: 'dsalpha' },
 ];
 
 function zeroAdminDay(date: string): AdminOverviewDaily {
