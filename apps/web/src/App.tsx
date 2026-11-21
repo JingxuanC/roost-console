@@ -248,7 +248,36 @@ function AuthScreen({ initialError = '' }: { initialError?: string }) {
         if (error) throw error;
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败');
+      const message = err instanceof Error ? err.message : '登录失败';
+      setError(message === 'Invalid login credentials'
+        ? '邮箱或密码不正确。如果这个账号是通过邮箱链接注册的（没有设置密码），请点下方「发送登录链接」。'
+        : message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendLoginLink() {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const cleanEmail = email.trim();
+      if (!cleanEmail) throw new Error('请先填写邮箱');
+      const { error } = await supabase.auth.signInWithOtp({
+        email: cleanEmail,
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: `${window.location.origin}/console/`,
+        },
+      });
+      if (error) throw error;
+      setNotice('登录链接已发送，请到邮箱点击链接（1 小时内有效）。');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '发送失败';
+      setError(message === 'Signups not allowed for otp'
+        ? '这个邮箱还没有账号，请先创建组织。'
+        : message);
     } finally {
       setBusy(false);
     }
@@ -291,7 +320,7 @@ function AuthScreen({ initialError = '' }: { initialError?: string }) {
             </label>
             <label>
               密码
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="至少 8 位" required minLength={8} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={mode === 'login' ? '没有密码可留空，用下方登录链接' : '至少 8 位'} required={mode === 'signup'} minLength={mode === 'signup' ? 8 : undefined} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
             </label>
             {mode === 'signup' && (
               <label>
@@ -314,6 +343,11 @@ function AuthScreen({ initialError = '' }: { initialError?: string }) {
               {busy ? '请稍候…' : mode === 'login' ? '登录' : '注册'}
             </button>
           </form>
+          {mode === 'login' && (
+            <button className="auth__switch" type="button" onClick={() => void sendLoginLink()} disabled={busy}>
+              没有设置密码？发送登录链接
+            </button>
+          )}
           <button className="auth__switch" type="button" onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setError(''); setNotice(''); }}>
             {mode === 'login' ? '还没有账号？创建组织' : '已有账号？直接登录'}
           </button>
