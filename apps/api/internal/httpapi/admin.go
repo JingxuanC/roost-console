@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JingxuanC/roost-console/apps/api/internal/billing"
 )
@@ -313,4 +314,75 @@ func (s *Server) adminReferrals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) orderAdminStore() orderAdmin {
+	if s.orderAdmin != nil {
+		return s.orderAdmin
+	}
+	if s.store != nil {
+		return s.store
+	}
+	return nil
+}
+
+// adminFulfillOrder is the manual recovery path for a paid order whose provider
+// notify was lost or rejected: the operator supplies the provider trade number
+// (or lets the API mint a manual one) and the exact stored amount is applied.
+// Fulfill is idempotent, so retries and double-clicks are safe.
+func (s *Server) adminFulfillOrder(w http.ResponseWriter, r *http.Request) {
+	store := s.orderAdminStore()
+	if store == nil {
+		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "billing store unavailable")
+		return
+	}
+	var req struct {
+		ProviderTradeNo string `json:"provider_trade_no"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req)
+	}
+	order, err := store.GetOrderByID(r.Context(), r.PathValue("orderID"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if order.Status == "refunded" {
+		writeError(w, http.StatusConflict, "order_refunded", "refunded orders cannot be fulfilled")
+		return
+	}
+	if order.Status == "fulfilled" || order.Status == "paid" {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "order": order, "already_fulfilled": true})
+		return
+	}
+	tradeNo := strings.TrimSpace(req.ProviderTradeNo)
+	if tradeNo == "" {
+		tradeNo = "manual_" + order.ID
+	}
+	operator := ""
+	if user := userFrom(r); user != nil {
+		operator = user.Email
+	}
+	raw, err := json.Marshal(map[string]any{
+		"manual":      true,
+		"operator":    operator,
+		"at":          time.Now().UTC().Format(time.RFC3339),
+		"order_id":    order.ID,
+		"trade_no":    tradeNo,
+		"amount_cent": order.AmountCents,
+	})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if err := store.Fulfill(r.Context(), order.ID, tradeNo, order.AmountCents, raw); err != nil {
+		s.fail(w, err)
+		return
+	}
+	updated, err := store.GetOrderByID(r.Context(), order.ID)
+	if err != nil {
+		updated = order
+	}
+	s.log.Info("admin order fulfilled", "order", order.ID, "operator", operator, "trade_no", tradeNo)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "order": updated})
 }

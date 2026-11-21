@@ -1,8 +1,12 @@
 package payment
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 )
@@ -42,5 +46,50 @@ func TestAmountCentsFromYuan(t *testing.T) {
 		if err != nil || got != want {
 			t.Fatalf("AmountCentsFromYuan(%q) = %d, %v; want %d", in, got, err, want)
 		}
+	}
+}
+
+func TestQueryReturnsProviderStatus(t *testing.T) {
+	var received url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode query body: %v", err)
+		}
+		received = url.Values{}
+		for key, value := range body {
+			received.Set(key, value)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"errcode": 0,
+			"data":    map[string]any{"status": "OD", "open_order_id": "open-1"},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	client := &Client{AppID: "app-1", AppSecret: "secret", QueryURL: server.URL, HTTP: server.Client()}
+	result, err := client.Query(context.Background(), "ORDER1")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if result.Status != "OD" {
+		t.Fatalf("status = %q, want OD", result.Status)
+	}
+	if received.Get("out_trade_order") != "ORDER1" || received.Get("appid") != "app-1" {
+		t.Fatalf("query params = %v", received)
+	}
+	if !Verify(received, "secret") {
+		t.Fatalf("query request signature invalid: %v", received)
+	}
+}
+
+func TestQueryRejectsProviderError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"errcode": 500, "errmsg": "invalid sign!"})
+	}))
+	t.Cleanup(server.Close)
+	client := &Client{AppID: "app-1", AppSecret: "secret", QueryURL: server.URL, HTTP: server.Client()}
+	if _, err := client.Query(context.Background(), "ORDER1"); err == nil {
+		t.Fatal("provider error was ignored")
 	}
 }

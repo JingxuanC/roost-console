@@ -243,3 +243,104 @@ func (s *Store) ListOrders(ctx context.Context, orgID string, limit int) ([]Orde
 }
 
 func nowPtr() *time.Time { t := time.Now(); return &t }
+
+// MarkOrderFailed closes an order whose provider checkout could not be created.
+// It only touches a still-'created' row: a race with a notify must never flip a
+// paid order to failed.
+func (s *Store) MarkOrderFailed(ctx context.Context, orderID, reason string) error {
+	_, err := s.Pool.Exec(ctx, `
+		update billing.orders
+		set status='failed', raw = raw || jsonb_build_object('failure', $2::text), updated_at=now()
+		where id=$1 and status='created'`, orderID, reason)
+	return err
+}
+
+// ExpireStaleOrders closes abandoned checkouts: an order that stayed
+// created/pending past the TTL can never be paid, so it should stop reading as
+// "in progress". A later provider notify still fulfills it (money first).
+func (s *Store) ExpireStaleOrders(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = 2 * time.Hour
+	}
+	tag, err := s.Pool.Exec(ctx, `
+		update billing.orders
+		set status='expired', updated_at=now()
+		where status in ('created','pending')
+		  and created_at < now() - make_interval(secs => $1)`, olderThan.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// ListReconcileOrders returns pending orders old enough that a notify should
+// already have arrived, newest window first. The reconciler queries the
+// provider for each one.
+func (s *Store) ListReconcileOrders(ctx context.Context, minAge time.Duration, limit int) ([]Order, error) {
+	if minAge <= 0 {
+		minAge = time.Minute
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.Pool.Query(ctx, `
+		select id,org_id,out_trade_no,sku,amount_cents,credits,status,coalesce(qr_url,''),coalesce(pay_url,''),paid_at,created_at
+		from billing.orders
+		where status='pending'
+		  and created_at < now() - make_interval(secs => $1)
+		  and created_at > now() - interval '24 hours'
+		  and (raw->>'reconcile_at' is null
+		       or (raw->>'reconcile_at')::timestamptz < now() - interval '10 minutes')
+		order by created_at
+		limit $2`, minAge.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Order, 0, limit)
+	for rows.Next() {
+		var o Order
+		if err := rows.Scan(&o.ID, &o.OrgID, &o.OutTradeNo, &o.SKU, &o.AmountCents, &o.Credits, &o.Status, &o.QRURL, &o.PayURL, &o.PaidAt, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// TouchOrderReconcile records when the reconciler last queried the provider so
+// an unpaid order is not re-queried every tick.
+func (s *Store) TouchOrderReconcile(ctx context.Context, orderID string) error {
+	_, err := s.Pool.Exec(ctx, `
+		update billing.orders
+		set raw = raw || jsonb_build_object('reconcile_at', now()), updated_at=now()
+		where id=$1 and status='pending'`, orderID)
+	return err
+}
+
+// CloseOrder marks one order with a terminal non-paid status ('expired' for a
+// provider-cancelled checkout). Paid orders are never touched.
+func (s *Store) CloseOrder(ctx context.Context, orderID, status string) error {
+	switch status {
+	case "expired", "failed":
+	default:
+		return fmt.Errorf("close order: unsupported status %q", status)
+	}
+	_, err := s.Pool.Exec(ctx, `
+		update billing.orders set status=$2, updated_at=now()
+		where id=$1 and status in ('created','pending')`, orderID, status)
+	return err
+}
+
+// GetOrderByID loads an order without an org scope; admin-only callers use it.
+func (s *Store) GetOrderByID(ctx context.Context, orderID string) (Order, error) {
+	var o Order
+	err := s.Pool.QueryRow(ctx, `
+		select id,org_id,out_trade_no,sku,amount_cents,credits,status,coalesce(qr_url,''),coalesce(pay_url,''),paid_at,created_at
+		from billing.orders where id=$1`, orderID).
+		Scan(&o.ID, &o.OrgID, &o.OutTradeNo, &o.SKU, &o.AmountCents, &o.Credits, &o.Status, &o.QRURL, &o.PayURL, &o.PaidAt, &o.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Order{}, ErrNotFound
+	}
+	return o, err
+}

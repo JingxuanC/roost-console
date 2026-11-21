@@ -25,6 +25,13 @@ import (
 	"github.com/JingxuanC/roost-console/apps/api/internal/ratelimit"
 )
 
+// orderAdmin is the admin/reconciliation slice of the billing store: manual
+// fulfillment and provider-order lookup.
+type orderAdmin interface {
+	GetOrderByID(ctx context.Context, orderID string) (billing.Order, error)
+	Fulfill(ctx context.Context, orderID, providerTradeNo string, amountCents int, raw []byte) error
+}
+
 // orgMembership is the authorization slice of the billing store used by
 // requireOrg. It is an interface so handler tests do not need Postgres.
 type orgMembership interface {
@@ -59,6 +66,7 @@ type Server struct {
 	referrals      referralBilling
 	adminGift      adminGiftBilling
 	adminReferral  adminReferralBilling
+	orderAdmin     orderAdmin
 
 	// Public path prefixes this deployment is mounted under (e.g. "/console-api"
 	// behind the nginx prefix strip). First-party clients sign the public path;
@@ -89,6 +97,7 @@ func New(cfg config.Config, store *billing.Store, verifier *auth.Verifier, pay *
 		s.referrals = store
 		s.adminGift = store
 		s.adminReferral = store
+		s.orderAdmin = store
 	}
 	return s
 }
@@ -126,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/admin/orgs/{orgID}/gift", s.withUser(s.adminOnly(s.adminGiftCredits)))
 	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/ledger", s.withUser(s.adminOnly(s.adminLedger)))
 	mux.HandleFunc("GET /v1/admin/orgs/{orgID}/orders", s.withUser(s.adminOnly(s.adminOrders)))
+	mux.HandleFunc("POST /v1/admin/orders/{orderID}/fulfill", s.withUser(s.adminOnly(s.adminFulfillOrder)))
 	mux.HandleFunc("GET /v1/admin/referrals", s.withUser(s.adminOnly(s.adminReferrals)))
 	// Referral program (user session; code creation is owner-only).
 	mux.HandleFunc("GET /v1/referral", s.withUser(s.referralOverview))
@@ -681,6 +691,11 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		res, err := s.pay.Create(payment.CreateInput{OutTradeNo: order.OutTradeNo, AmountCents: pack.AmountCents, Title: pack.Title, Attach: org.ID})
 		if err != nil {
 			s.log.Error("xunhupay create failed", "err", err, "order", order.ID)
+			// The row is already persisted; leaving it 'created' makes an
+			// abandoned checkout look like an in-progress order forever.
+			if markErr := s.store.MarkOrderFailed(r.Context(), order.ID, err.Error()); markErr != nil {
+				s.log.Warn("mark order failed", "order", order.ID, "err", markErr)
+			}
 			writeError(w, http.StatusBadGateway, "payment_unavailable", "payment provider unavailable")
 			return
 		}

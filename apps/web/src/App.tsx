@@ -1966,7 +1966,12 @@ function Orders({ orders }: { orders: Order[] }) {
             <span className="mono">{order.sku}</span>
             <span>{yuan(order.amount_cents)}</span>
             <span>{credits(order.credits)}</span>
-            <span><span className={`status status--${order.status}`}>{order.status}</span></span>
+            <span>
+              <span className={`status status--${order.status}`}>{order.status}</span>
+              {order.status === 'pending' && order.pay_url && (
+                <a className="status__pay" href={order.pay_url} target="_blank" rel="noreferrer">去支付</a>
+              )}
+            </span>
           </div>
         ))}
       </div>

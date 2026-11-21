@@ -2,6 +2,7 @@ package payment
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -20,10 +21,13 @@ import (
 
 var ErrNotConfigured = errors.New("payment provider is not configured")
 
+const DefaultQueryURL = "https://api.xunhupay.com/payment/query.html"
+
 type Client struct {
 	AppID     string
 	AppSecret string
 	APIBase   string
+	QueryURL  string
 	NotifyURL string
 	ReturnURL string
 	HTTP      *http.Client
@@ -135,4 +139,62 @@ func AmountCentsFromYuan(s string) (int, error) {
 		return 0, err
 	}
 	return int(f*100 + 0.5), nil
+}
+
+// QueryResult is one order-query response. Status is the provider's order
+// status: "OD" paid, "WP" waiting, "CD" cancelled.
+type QueryResult struct {
+	Status string
+	Raw    map[string]any
+}
+
+// Query asks the provider for the current state of one merchant order. It is the
+// reconciliation path for a lost or rejected notify: the relay never trusts the
+// webhook alone.
+//
+// The query response's hash is not verified: the provider documents the signed
+// field set ambiguously for nested data, and the request itself runs over TLS to
+// the configured provider. Fulfillment still matches our own out_trade_no and
+// the order's stored amount, so a forged response can at worst mark an order we
+// created as paid at its own price.
+func (c *Client) Query(ctx context.Context, outTradeNo string) (QueryResult, error) {
+	if c.AppID == "" || c.AppSecret == "" {
+		return QueryResult{}, ErrNotConfigured
+	}
+	queryURL := strings.TrimSpace(c.QueryURL)
+	if queryURL == "" {
+		queryURL = DefaultQueryURL
+	}
+	form := url.Values{}
+	form.Set("appid", c.AppID)
+	form.Set("out_trade_order", outTradeNo)
+	form.Set("time", strconv.FormatInt(time.Now().Unix(), 10))
+	form.Set("nonce_str", strings.ReplaceAll(uuid.NewString(), "-", ""))
+	form.Set("hash", Sign(form, c.AppSecret))
+
+	body, _ := json.Marshal(formToMap(form))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, queryURL, bytes.NewReader(body))
+	if err != nil {
+		return QueryResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return QueryResult{}, fmt.Errorf("xunhupay query response: %w", err)
+	}
+	code, _ := out["errcode"].(float64)
+	if int(code) != 0 {
+		return QueryResult{}, fmt.Errorf("xunhupay query: %v %v", out["errcode"], out["errmsg"])
+	}
+	status := ""
+	if payload, ok := out["data"].(map[string]any); ok {
+		status, _ = payload["status"].(string)
+	}
+	return QueryResult{Status: status, Raw: out}, nil
 }

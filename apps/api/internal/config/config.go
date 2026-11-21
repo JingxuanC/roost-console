@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -13,22 +14,26 @@ const (
 )
 
 type Config struct {
-	Port              string
-	DatabaseURL       string
-	SupabaseURL       string
-	SupabaseAnonKey   string
-	SupabaseDialIP    string
-	PublicBaseURL     string
-	ConsoleOrigin     string
-	ServiceSecret     string
-	ServiceSecrets    map[string][]string
-	XunhuAppID        string
-	XunhuAppSecret    string
-	XunhuAPIBase      string
-	XunhuNotifyURL    string
-	XunhuReturnURL    string
-	Environment       string
-	AdminEmails       []string
+	Port            string
+	DatabaseURL     string
+	SupabaseURL     string
+	SupabaseAnonKey string
+	SupabaseDialIP  string
+	PublicBaseURL   string
+	ConsoleOrigin   string
+	ServiceSecret   string
+	ServiceSecrets  map[string][]string
+	XunhuAppID      string
+	XunhuAppSecret  string
+	XunhuAPIBase    string
+	XunhuQueryURL   string
+	XunhuNotifyURL  string
+	XunhuReturnURL  string
+	Environment     string
+	AdminEmails     []string
+	// PaymentOrderTTL expires unpaid orders after this window so an abandoned
+	// checkout cannot sit in the order list forever.
+	PaymentOrderTTL   time.Duration
 	RatePaymentNotify int
 	RateOIDCToken     int
 	RateProductToken  int
@@ -81,9 +86,11 @@ func Load() Config {
 		XunhuAppID:        get("XUNHUPAY_APPID", ""),
 		XunhuAppSecret:    get("XUNHUPAY_APPSECRET", ""),
 		XunhuAPIBase:      get("XUNHUPAY_API_BASE", "https://api.xunhupay.com/payment/do.html"),
+		XunhuQueryURL:     get("XUNHUPAY_QUERY_URL", "https://api.xunhupay.com/payment/query.html"),
 		XunhuNotifyURL:    get("XUNHUPAY_NOTIFY_URL", ""),
 		XunhuReturnURL:    get("XUNHUPAY_RETURN_URL", ""),
 		Environment:       get("APP_ENV", "development"),
+		PaymentOrderTTL:   getDuration("PAYMENT_ORDER_TTL", 2*time.Hour),
 		RatePaymentNotify: getInt("RATE_PAYMENT_NOTIFY_PER_MIN", 120),
 		RateOIDCToken:     getInt("RATE_OIDC_TOKEN_PER_MIN", 60),
 		RateProductToken:  getInt("RATE_PRODUCT_TOKEN_PER_MIN", 5),
@@ -104,6 +111,18 @@ func Load() Config {
 		MemoryMCPURL:       strings.TrimRight(get("CAUSAL_MEMORY_MCP_URL", get("MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp")), "/"),
 		MemoryTokenPushURL: strings.TrimRight(get("CAUSAL_MEMORY_TOKEN_PUSH_URL", "https://causal-memory.com/memory/__token"), "/"),
 	}
+}
+
+func getDuration(k string, d time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(k))
+	if raw == "" {
+		return d
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return d
+	}
+	return parsed
 }
 
 func getInt(k string, d int) int {
