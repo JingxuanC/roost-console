@@ -28,10 +28,12 @@ const (
 	AdminProductRelay        = "relay"
 	AdminProductMarket       = "market"
 	AdminProductCausalMemory = "causal-memory"
-	AdminProductDslpha       = "dslpha"
+	// The ledger's product column uses the app's real name, "dsalpha". The
+	// admin API keeps the dslpha_credits field names for wire compatibility.
+	AdminProductDslpha = "dsalpha"
 )
 
-const adminSpendReasons = `reason in ('usage','relay_usage')`
+const adminSpendReasons = `reason in ('usage','relay_usage','sandbox_usage')`
 
 // adminSince is the UTC calendar-day start of the trailing range. $1 is the day
 // count; callers keep the same placeholder in every query.
@@ -46,7 +48,7 @@ const adminOrgActivityCTEs = `
 		       coalesce(sum(abs(delta_credits)) filter (where product='relay'),0)::bigint as relay_credits,
 		       coalesce(sum(abs(delta_credits)) filter (where product='market'),0)::bigint as market_credits,
 		       coalesce(sum(abs(delta_credits)) filter (where product='causal-memory'),0)::bigint as memory_credits,
-		       coalesce(sum(abs(delta_credits)) filter (where product='dslpha'),0)::bigint as dslpha_credits,
+		       coalesce(sum(abs(delta_credits)) filter (where product='dsalpha'),0)::bigint as dslpha_credits,
 		       coalesce(sum(abs(delta_credits)),0)::bigint as total_credits
 		from billing.ledger
 		where delta_credits < 0 and ` + adminSpendReasons + ` and created_at >= ` + adminSince + `

@@ -5,15 +5,16 @@ import { redeemEmailTokenHash } from './lib/emailConfirm';
 import { api, type AdminOrg, type AdminOverview, type AdminOverviewDaily, type AdminReferrals, type BillingDetails, type BillingSandboxRow, type BillingTokenRow, type BillingView, type MeResponse, type Order, type Plan, type ReferralOverview, type RelayKey, type UsageDailyRow, type UsageRecentRow, type UsageTotals } from './lib/api';
 
 const PRODUCT_LABELS: Record<string, string> = {
-  dslpha: 'DeepSeek Alpha · 投研工作台',
+  dsalpha: 'dsalpha · 投研工作台',
+  dslpha: 'dsalpha · 投研工作台',
   market: 'Roost Market · 算力市场',
   'causal-memory': 'Causal Memory · 智能体记忆',
 };
 
 const CREDIT_PACKS = [
-  { sku: 'token_50', label: '5,000 token 余额', price: '¥50', note: '≈ DeepSeek V4-Pro 25M / Opus 5.5 5.5M 输入 tokens' },
-  { sku: 'token_100', label: '10,000 token 余额', price: '¥100', note: '≈ DeepSeek V4-Pro 50M / Opus 5.5 11M 输入 tokens' },
-  { sku: 'token_500', label: '50,000 token 余额', price: '¥500', note: '≈ DeepSeek V4-Pro 252M / Opus 5.5 55M 输入 tokens' },
+  { sku: 'token_50', label: '5,000 credits', price: '¥50', note: '≈ DeepSeek V4-Pro 25M 输入 tokens，全产品通用' },
+  { sku: 'token_100', label: '10,000 credits', price: '¥100', note: '≈ DeepSeek V4-Pro 50M 输入 tokens，全产品通用' },
+  { sku: 'token_500', label: '50,000 credits', price: '¥500', note: '≈ DeepSeek V4-Pro 252M 输入 tokens，全产品通用' },
 ];
 
 const WORKSPACES = [
@@ -70,6 +71,16 @@ function Workspaces() {
       </div>
     </section>
   );
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Orgs created by the product bridges are named after the Supabase user id.
+// That is a correct unique key but a terrible label, so render a person org.
+function displayOrgName(name: string, ownerUserID: string): string {
+  if (!name) return '—';
+  if (UUID_RE.test(name) && (!ownerUserID || name === ownerUserID)) return '个人组织';
+  return name;
 }
 
 function credits(n: number) {
@@ -260,7 +271,7 @@ function AuthScreen({ initialError = '' }: { initialError?: string }) {
               <span className="tag tag--live">active</span>
             </div>
             <div className="auth__ledger-row"><span>余额</span><strong>12,480 credits</strong></div>
-            <div className="auth__ledger-row"><span>产品</span><span>sandbox · market · dslpha · causal-memory</span></div>
+            <div className="auth__ledger-row"><span>产品</span><span>sandbox · market · dsalpha · causal-memory</span></div>
             <div className="auth__ledger-row"><span>账单</span><span>一个组织，一份账单</span></div>
           </div>
         </div>
@@ -323,6 +334,7 @@ function Header({ email, onSignOut }: { email: string; onSignOut: () => void }) 
         <a href="#billing-details">扣费明细</a>
         <a href="#usage">用量</a>
         <a href="#products">产品</a>
+        <a href="#recharge">充值</a>
         <a href="#plans">套餐</a>
         <a href="#orders">订单</a>
       </nav>
@@ -1082,7 +1094,7 @@ function CausalMemory({ token, orgId }: { token: string; orgId: string }) {
         <h2>把记忆接到 Agent。</h2>
         <p className="muted">
           用组织 token 连接 Causal Memory MCP。调用和存储按组织额度计费，
-          与 market、dslpha 共用同一个钱包。
+          与 market、dsalpha 共用同一个钱包。
         </p>
         <code className="causal__endpoint">https://causal-memory.com/memory/mcp</code>
       </div>
@@ -1098,6 +1110,44 @@ function CausalMemory({ token, orgId }: { token: string; orgId: string }) {
           <button className="btn btn--ink" onClick={() => void issue()} disabled={busy}>{busy ? '生成中…' : '生成 MCP Token'}</button>
         )}
         {error && <p className="form-error">{error}</p>}
+      </div>
+    </section>
+  );
+}
+
+function Recharge({ current, alwaysOnUntil, onBuy, busy }: { current: string; alwaysOnUntil?: string | null; onBuy: (sku: string) => void; busy: string }) {
+  const addon = current === 'pro' || current === 'max';
+  return (
+    <section className="section" id="recharge">
+      <div className="section__head">
+        <div><p className="kicker">TOP UP</p><h2>单独充值积分。</h2></div>
+        <p className="section__intro">不绑定套餐，按需购买；支付成功后自动到账，Sandbox、Market、dsalpha、Causal Memory 共用同一份余额。</p>
+      </div>
+      <div className="recharge-grid">
+        {CREDIT_PACKS.map((pack) => (
+          <article className="recharge-card" key={pack.sku}>
+            <p className="recharge-card__credits">{pack.label}</p>
+            <div className="recharge-card__price"><strong>{pack.price}</strong><span>一次性</span></div>
+            <p className="recharge-card__note">{pack.note}</p>
+            <button className="btn btn--ink btn--wide" disabled={busy === pack.sku} onClick={() => onBuy(pack.sku)}>
+              {busy === pack.sku ? '创建订单…' : '立即充值'}
+            </button>
+          </article>
+        ))}
+        {addon && (
+          <article className="recharge-card">
+            <p className="recharge-card__credits">Always-on 沙箱</p>
+            <div className="recharge-card__price"><strong>¥49</strong><span>每台 / 30 天</span></div>
+            <p className="recharge-card__note">
+              {alwaysOnUntil
+                ? `已开通至 ${new Date(alwaysOnUntil).toLocaleDateString('zh-CN')}，可继续续期。`
+                : '常驻沙箱，不占普通沙箱配额。'}
+            </p>
+            <button className="btn btn--ink btn--wide" disabled={busy === 'addon_always_on_30d'} onClick={() => onBuy('addon_always_on_30d')}>
+              {busy === 'addon_always_on_30d' ? '创建订单…' : '开通 / 续期'}
+            </button>
+          </article>
+        )}
       </div>
     </section>
   );
@@ -1139,25 +1189,6 @@ function Plans({ plans, current, alwaysOnUntil, onBuy, busy }: { plans: Plan[]; 
             </article>
           );
         })}
-      </div>
-      <div className="packs">
-        <p className="kicker">CREDIT PACKS</p>
-        {CREDIT_PACKS.map((pack) => (
-          <button key={pack.sku} className="pack" disabled={busy === pack.sku} onClick={() => onBuy(pack.sku)}>
-            <span>{pack.label}</span>
-            <strong>{pack.price}</strong>
-            <span style={{ display: 'block', fontSize: 11, opacity: 0.65, marginTop: 4 }}>{pack.note}</span>
-          </button>
-        ))}
-        {(current === 'pro' || current === 'max') && (
-          <button className="pack" disabled={busy === 'addon_always_on_30d'} onClick={() => onBuy('addon_always_on_30d')}>
-            <span>
-              Always-on 沙箱（每台/30 天）
-              {alwaysOnUntil ? ` · 已开通至 ${new Date(alwaysOnUntil).toLocaleDateString('zh-CN')}` : ''}
-            </span>
-            <strong>¥49</strong>
-          </button>
-        )}
       </div>
     </section>
   );
@@ -1319,7 +1350,7 @@ const ADMIN_SPEND_PRODUCTS: Array<{ key: string; field: AdminSpendField; label: 
   { key: 'relay', field: 'relay', label: 'Relay · 模型中转', short: 'Relay' },
   { key: 'market', field: 'market', label: 'Market · 算力市场', short: 'Market' },
   { key: 'causal-memory', field: 'causal-memory', label: 'Causal Memory · 记忆', short: 'Memory' },
-  { key: 'dslpha', field: 'dslpha', label: 'dslpha · 投研工作台', short: 'dslpha' },
+  { key: 'dslpha', field: 'dslpha', label: 'dsalpha · 投研工作台', short: 'dsalpha' },
 ];
 
 function zeroAdminDay(date: string): AdminOverviewDaily {
@@ -1698,7 +1729,7 @@ function AdminPanel({ token }: { token: string }) {
             <thead>
               <tr>
                 <th>组织</th><th>Owner</th><th>套餐</th><th>余额</th><th>订单</th><th>营收</th>
-                <th>Relay</th><th>Market</th><th>Memory</th><th>dslpha</th><th>Sandbox</th><th>Tokens</th><th>缓存命中</th>
+                <th>Relay</th><th>Market</th><th>Memory</th><th>dsalpha</th><th>Sandbox</th><th>Tokens</th><th>缓存命中</th>
               </tr>
             </thead>
             <tbody>
@@ -1707,7 +1738,7 @@ function AdminPanel({ token }: { token: string }) {
               ) : topOrgs.map((org) => (
                 <tr key={org.org_id}>
                   <td>
-                    <span className="admin-table__org">{org.name}</span>
+                    <span className="admin-table__org">{displayOrgName(org.name, org.owner_user_id)}</span>
                     <span className="admin-sub mono" title={org.org_id}>{org.org_id.slice(0, 8)}…</span>
                   </td>
                   <td>
@@ -1755,7 +1786,7 @@ function AdminPanel({ token }: { token: string }) {
               <tr>
                 <th>用户</th><th>组织</th><th>套餐</th><th>订单</th><th>营收</th>
                 <th>Tokens</th><th>Top model</th>
-                <th>Relay</th><th>Market</th><th>Memory</th><th>dslpha</th><th>Sandbox</th>
+                <th>Relay</th><th>Market</th><th>Memory</th><th>dsalpha</th><th>Sandbox</th>
               </tr>
             </thead>
             <tbody>
@@ -1770,7 +1801,7 @@ function AdminPanel({ token }: { token: string }) {
                     </span>
                   </td>
                   <td>
-                    <span className="admin-table__org">{user.org_name}</span>
+                    <span className="admin-table__org">{displayOrgName(user.org_name, user.user_id)}</span>
                     <span className="admin-sub mono" title={user.org_id}>{user.org_id.slice(0, 8)}…</span>
                   </td>
                   <td><span className="tag">{planLabel(user.plan_code)}</span></td>
@@ -2178,9 +2209,9 @@ function Console({ session }: { session: Session }) {
         <div className="page__intro">
           <div>
             <p className="kicker">ORGANIZATION</p>
-            <h1>{me.org.name}</h1>
+            <h1>{displayOrgName(me.org.name, "")}</h1>
           </div>
-          <p className="page__intro-note">一个组织 ID，贯穿 Sandbox、Market、dslpha 与 causal-memory。积分与凭证实时共享。</p>
+          <p className="page__intro-note">一个组织 ID，贯穿 Sandbox、Market、dsalpha 与 causal-memory。积分与凭证实时共享。</p>
         </div>
         {error && <p className="form-error">{error}</p>}
         {claimNotice && (
@@ -2197,6 +2228,7 @@ function Console({ session }: { session: Session }) {
         )}
         <Workspaces />
         <WalletCard billing={me.billing} />
+        <Recharge current={me.billing.plan.code} alwaysOnUntil={me.billing.always_on_until} onBuy={buy} busy={busy} />
         {me.org.role === 'owner' && <ReferralCard token={token} version={referralVersion} />}
         <BillingDetailsSection token={token} orgId={me.org.id} />
         <Products billing={me.billing} />
