@@ -9,14 +9,14 @@ import (
 )
 
 type Entitlement struct {
-	OrgID        string `json:"org_id"`
-	Product      string `json:"product"`
-	Enabled      bool   `json:"enabled"`
-	PlanCode     string `json:"plan_code"`
-	MonthlyCap   *int64 `json:"monthly_cap_credits"`
-	Available    int64  `json:"available_credits"`
-	Balance      int64  `json:"balance_credits"`
-	Reserved     int64  `json:"reserved_credits"`
+	OrgID      string `json:"org_id"`
+	Product    string `json:"product"`
+	Enabled    bool   `json:"enabled"`
+	PlanCode   string `json:"plan_code"`
+	MonthlyCap *int64 `json:"monthly_cap_credits"`
+	Available  int64  `json:"available_credits"`
+	Balance    int64  `json:"balance_credits"`
+	Reserved   int64  `json:"reserved_credits"`
 }
 
 func (s *Store) Resolve(ctx context.Context, orgID, product string) (Entitlement, error) {

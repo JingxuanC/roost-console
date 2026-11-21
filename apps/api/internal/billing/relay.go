@@ -38,23 +38,44 @@ type RelayOperation struct {
 	ReservationID string
 	Amount        int64
 	ErrorCode     string
+	ToolCharges   []ToolCharge
+	Compression   *Compression
+	Usage         *UsageEvent
 }
 
-// RelayAPIKey resolves an rk- key to its organization.
-func (s *Store) RelayAPIKey(ctx context.Context, token string) (string, error) {
+// RelayIdentity is the identity an rk- relay token authorizes. OrgID is the
+// billing tenant; UserID is the console user that issued the token. UserID is
+// empty for legacy tokens issued before 0012_product_token_user.sql, which are
+// org-scoped only. Callers must treat an empty UserID as "no user binding" and
+// fall back to org-scoped behavior rather than rejecting the request.
+type RelayIdentity struct {
+	OrgID  string
+	UserID string
+}
+
+// RelayAPIKey resolves an rk- key to its organization and (when present) the
+// user that issued it.
+func (s *Store) RelayAPIKey(ctx context.Context, token string) (RelayIdentity, error) {
 	hash := hashProductToken(token)
-	var orgID string
+	var (
+		identity RelayIdentity
+		userID   *string
+	)
 	err := s.Pool.QueryRow(ctx, `
-		select org_id from billing.product_tokens
-		where token_hash=$1 and product='relay' and revoked_at is null`, hash).Scan(&orgID)
+		select org_id, created_by_user_id::text from billing.product_tokens
+		where token_hash=$1 and product='relay' and revoked_at is null`, hash).
+		Scan(&identity.OrgID, &userID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrRelayNotFound
+		return RelayIdentity{}, ErrRelayNotFound
 	}
 	if err != nil {
-		return "", err
+		return RelayIdentity{}, err
+	}
+	if userID != nil {
+		identity.UserID = *userID
 	}
 	_, _ = s.Pool.Exec(ctx, `update billing.product_tokens set last_used_at=now() where token_hash=$1`, hash)
-	return orgID, nil
+	return identity, nil
 }
 
 // RelayBalance returns the organization's available credits (balance - holds).
@@ -129,31 +150,81 @@ func (s *Store) RelayReserve(ctx context.Context, orgID, requestID string, amoun
 }
 
 // RelaySettle charges the reservation's actual spend exactly once, keyed by the
-// relay's settle idempotency key. The settle call names only the reservation, so
-// the organization is read from it.
+// relay's settle idempotency key. It keeps the original four-argument shape for
+// callers that predate tool-call breakdowns.
 func (s *Store) RelaySettle(ctx context.Context, reservationID, idempotencyKey string, amount int64) (RelayOperation, error) {
+	return s.RelaySettleWithCharges(ctx, reservationID, idempotencyKey, idempotencyKey, amount, nil)
+}
+
+// RelaySettleWithCharges books a settlement and its per-tool breakdown in one
+// transaction. It keeps the pre-compression shape for callers that do not
+// report savings or usage.
+func (s *Store) RelaySettleWithCharges(ctx context.Context, reservationID, settlementID, idempotencyKey string, amount int64, toolCharges []ToolCharge) (RelayOperation, error) {
+	return s.RelaySettleWithDetails(ctx, reservationID, settlementID, idempotencyKey, amount, toolCharges, nil, nil)
+}
+
+// RelaySettleWithDetails books a settlement together with its per-tool
+// breakdown, optional compression savings and optional usage report in one
+// transaction. settlementID is the relay's settlement identifier from the
+// request (falling back to the idempotency key when absent); idempotencyKey is
+// the ledger key that makes retries safe.
+func (s *Store) RelaySettleWithDetails(ctx context.Context, reservationID, settlementID, idempotencyKey string, amount int64, toolCharges []ToolCharge, compression *Compression, usage *UsageEvent) (RelayOperation, error) {
 	if amount < 0 {
 		return RelayOperation{}, errors.New("relay: settle amount must be >= 0")
+	}
+	charges, err := NormalizeToolCharges(toolCharges)
+	if err != nil {
+		return RelayOperation{}, err
+	}
+	compression, err = NormalizeCompression(compression)
+	if err != nil {
+		return RelayOperation{}, err
+	}
+	usage, err = NormalizeUsage(usage)
+	if err != nil {
+		return RelayOperation{}, err
+	}
+	if settlementID == "" {
+		settlementID = idempotencyKey
 	}
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return RelayOperation{}, err
 	}
 	defer tx.Rollback(ctx)
-	// Replay of an already-booked settlement.
+	// Replay of an already-booked settlement: return the original amount and
+	// breakdown without inserting another row.
 	var booked int64
 	var refID string
 	if err := tx.QueryRow(ctx, `select delta_credits,coalesce(ref_id,'') from billing.ledger where idempotency_key=$1`, idempotencyKey).Scan(&booked, &refID); err == nil {
-		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: refID, Amount: -booked}, tx.Commit(ctx)
+		var existing []ToolCharge
+		var existingCompression *Compression
+		var existingUsage *UsageEvent
+		if refID != "" {
+			var qerr error
+			existing, qerr = queryToolCharges(ctx, tx, refID)
+			if qerr != nil {
+				return RelayOperation{}, qerr
+			}
+			existingCompression, qerr = queryCompression(ctx, tx, refID)
+			if qerr != nil {
+				return RelayOperation{}, qerr
+			}
+			existingUsage, qerr = queryUsageEvent(ctx, tx, refID)
+			if qerr != nil {
+				return RelayOperation{}, qerr
+			}
+		}
+		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: refID, Amount: -booked, ToolCharges: existing, Compression: existingCompression, Usage: existingUsage}, tx.Commit(ctx)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return RelayOperation{}, err
 	}
-	var orgID string
+	var orgID, requestID string
 	var reserved int64
 	var status string
 	if err := tx.QueryRow(ctx, `
-		select org_id,reserved_credits,status from billing.usage_leases
-		where id=$1 and product='relay' for update`, reservationID).Scan(&orgID, &reserved, &status); err != nil {
+		select org_id,run_ref,reserved_credits,status from billing.usage_leases
+		where id=$1 and product='relay' for update`, reservationID).Scan(&orgID, &requestID, &reserved, &status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return RelayOperation{}, ErrRelayNotFound
 		}
@@ -165,7 +236,19 @@ func (s *Store) RelaySettle(ctx context.Context, reservationID, idempotencyKey s
 	if status == "settled" {
 		var settled int64
 		_ = tx.QueryRow(ctx, `select coalesce(settled_credits,0) from billing.usage_leases where id=$1`, reservationID).Scan(&settled)
-		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: reservationID, Amount: settled}, tx.Commit(ctx)
+		existing, qerr := queryToolCharges(ctx, tx, reservationID)
+		if qerr != nil {
+			return RelayOperation{}, qerr
+		}
+		existingCompression, qerr := queryCompression(ctx, tx, reservationID)
+		if qerr != nil {
+			return RelayOperation{}, qerr
+		}
+		existingUsage, qerr := queryUsageEvent(ctx, tx, reservationID)
+		if qerr != nil {
+			return RelayOperation{}, qerr
+		}
+		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: reservationID, Amount: settled, ToolCharges: existing, Compression: existingCompression, Usage: existingUsage}, tx.Commit(ctx)
 	}
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "wallet:"+orgID); err != nil {
 		return RelayOperation{}, err
@@ -184,16 +267,33 @@ func (s *Store) RelaySettle(ctx context.Context, reservationID, idempotencyKey s
 		where org_id=$1`, orgID, amount, reserved); err != nil {
 		return RelayOperation{}, err
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		insert into billing.ledger (org_id,product,delta_credits,reason,ref_id,idempotency_key)
 		values ($1,'relay',$2,'relay_usage',$3,$4)
-		on conflict (idempotency_key) do nothing`, orgID, -amount, reservationID, idempotencyKey); err != nil {
+		on conflict (idempotency_key) do nothing`, orgID, -amount, reservationID, idempotencyKey)
+	if err != nil {
+		return RelayOperation{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		// A concurrent settle with the same key won after our initial read.
+		// Roll back the wallet change and return the winner's booking; this also
+		// guarantees the breakdown is never written twice.
+		_ = tx.Rollback(ctx)
+		return s.RelayOperation(ctx, idempotencyKey)
+	}
+	if err := insertToolCharges(ctx, tx, orgID, requestID, settlementID, reservationID, charges); err != nil {
+		return RelayOperation{}, err
+	}
+	if err := insertCompression(ctx, tx, orgID, requestID, settlementID, reservationID, compression); err != nil {
+		return RelayOperation{}, err
+	}
+	if err := insertUsageEvent(ctx, tx, orgID, requestID, settlementID, reservationID, usage); err != nil {
 		return RelayOperation{}, err
 	}
 	if _, err := tx.Exec(ctx, `update billing.usage_leases set status='settled',settled_credits=$2 where id=$1`, reservationID, amount); err != nil {
 		return RelayOperation{}, err
 	}
-	return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: reservationID, Amount: amount}, tx.Commit(ctx)
+	return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: reservationID, Amount: amount, ToolCharges: charges, Compression: compression, Usage: usage}, tx.Commit(ctx)
 }
 
 // RelayRelease frees a hold that never produced billable upstream work.
@@ -262,7 +362,24 @@ func (s *Store) RelayOperation(ctx context.Context, idempotencyKey string) (Rela
 		if op == "reserve" && status == "settled" {
 			amount = settled
 		}
-		return RelayOperation{Found: true, Operation: op, Status: status, ReservationID: id, Amount: amount}, nil
+		var charges []ToolCharge
+		var compression *Compression
+		var usage *UsageEvent
+		if status == "settled" {
+			charges, err = queryToolCharges(ctx, s.Pool, id)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+			compression, err = queryCompression(ctx, s.Pool, id)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+			usage, err = queryUsageEvent(ctx, s.Pool, id)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+		}
+		return RelayOperation{Found: true, Operation: op, Status: status, ReservationID: id, Amount: amount, ToolCharges: charges, Compression: compression, Usage: usage}, nil
 	case "settle":
 		var delta int64
 		var refID string
@@ -273,8 +390,40 @@ func (s *Store) RelayOperation(ctx context.Context, idempotencyKey string) (Rela
 		if err != nil {
 			return RelayOperation{}, err
 		}
-		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: refID, Amount: -delta}, nil
+		var charges []ToolCharge
+		var compression *Compression
+		var usage *UsageEvent
+		if refID != "" {
+			charges, err = queryToolCharges(ctx, s.Pool, refID)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+			compression, err = queryCompression(ctx, s.Pool, refID)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+			usage, err = queryUsageEvent(ctx, s.Pool, refID)
+			if err != nil {
+				return RelayOperation{}, err
+			}
+		}
+		return RelayOperation{Found: true, Operation: "settle", Status: "settled", ReservationID: refID, Amount: -delta, ToolCharges: charges, Compression: compression, Usage: usage}, nil
 	default:
 		return RelayOperation{Found: false}, nil
 	}
+}
+
+// RelayToolCharges returns a settled (or settling) relay reservation's per-tool
+// breakdown. It gives reporting surfaces a direct read path besides replaying
+// the settle idempotency key.
+func (s *Store) RelayToolCharges(ctx context.Context, reservationID string) ([]ToolCharge, error) {
+	var exists bool
+	if err := s.Pool.QueryRow(ctx, `
+		select exists(select 1 from billing.usage_leases where id=$1 and product='relay')`, reservationID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, ErrRelayNotFound
+	}
+	return queryToolCharges(ctx, s.Pool, reservationID)
 }

@@ -11,8 +11,9 @@ import (
 )
 
 type User struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	CreatedAt string `json:"created_at"`
 }
 
 func (u *User) EmailOrID() string {

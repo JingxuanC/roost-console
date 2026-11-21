@@ -39,7 +39,27 @@ POST /internal/v1/usage/leases/{lease_id}/settle
 
 POST /internal/v1/usage/leases/{lease_id}/release
 {}
+
+POST /internal/v1/usage/sandbox
+{"org_id":"...","product":"market","sandbox_id":"sbx-1","provider":"daytona",
+ "provider_sandbox_id":"...","run_id":"run-...","started_at":"...","ended_at":"...",
+ "billable_seconds":3600,"cpu_seconds":3600,"memory_mib_seconds":3686400,
+ "disk_mib_seconds":921600,"gpu_seconds":0,
+ "cpu_credits":1.5,"memory_credits":1.5,"disk_credits":1,
+ "unit_prices":{"cpu_credits_per_second":0.0004},
+ "idempotency_key":"sbx-run-..."}
+→ 201 {id, charged_credits, balance_credits, credits_minor, replayed:false}
+→ 200 同一 idempotency_key 重放，返回原记录且不重复扣款
+→ 402 余额不足，且不会写入明细
 ```
+
+沙箱上报规则：
+
+- `sandbox_id` 是逻辑沙箱，跨 provider 重启保持不变
+- 四个组件 credits 可省略总额；总额取组件之和向上取整，至少 1 credit
+- `credits_minor = total_credits * 1000`（控制台约定 1 credit = 1000 minor，100 credits = ¥1）
+- 明细行与钱包扣款、ledger（`reason='sandbox_usage'`）在同一事务提交
+- `idempotency_key` 由产品生成且全局唯一，重试必须复用
 
 规则：
 

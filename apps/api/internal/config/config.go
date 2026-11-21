@@ -3,39 +3,57 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
+	"time"
+)
+
+const (
+	DefaultReferralInviterCredits int64 = 1000
+	DefaultReferralInviteeCredits int64 = 1000
 )
 
 type Config struct {
-	Port              string
-	DatabaseURL       string
-	SupabaseURL       string
-	SupabaseAnonKey   string
-	SupabaseDialIP    string
-	PublicBaseURL     string
-	ConsoleOrigin     string
-	ServiceSecret     string
-	ServiceSecrets    map[string][]string
-	XunhuAppID        string
-	XunhuAppSecret    string
-	XunhuAPIBase      string
-	XunhuNotifyURL    string
-	XunhuReturnURL    string
-	Environment       string
-	AdminEmails       []string
+	Port            string
+	DatabaseURL     string
+	SupabaseURL     string
+	SupabaseAnonKey string
+	SupabaseDialIP  string
+	PublicBaseURL   string
+	ConsoleOrigin   string
+	ServiceSecret   string
+	ServiceSecrets  map[string][]string
+	XunhuAppID      string
+	XunhuAppSecret  string
+	XunhuAPIBase    string
+	XunhuQueryURL   string
+	XunhuNotifyURL  string
+	XunhuReturnURL  string
+	Environment     string
+	AdminEmails     []string
+	// PaymentOrderTTL expires unpaid orders after this window so an abandoned
+	// checkout cannot sit in the order list forever.
+	PaymentOrderTTL   time.Duration
 	RatePaymentNotify int
 	RateOIDCToken     int
 	RateProductToken  int
-	OIDCIssuer        string
-	OIDCClientID      string
-	OIDCClientSecret  string
-	OIDCRedirectURIs  string
-	OIDCConsentURL    string
+	// Referral program. Reward amounts are copied onto each referral row at
+	// claim time, so changing the env only affects future claims.
+	ReferralInviterCredits int64
+	ReferralInviteeCredits int64
+	ReferralMaxUses        int
+	RateReferralClaim      int
+	OIDCIssuer             string
+	OIDCClientID           string
+	OIDCClientSecret       string
+	OIDCRedirectURIs       string
+	OIDCConsentURL         string
 	// Public URLs handed to the CLI bootstrap endpoint. They are display/config
 	// values, never secrets.
-	MarketAPIURL  string
-	ConsoleAPIURL string
-	MemoryMCPURL  string
+	MarketAPIURL       string
+	ConsoleAPIURL      string
+	MemoryMCPURL       string
+	MemoryTokenPushURL string
 }
 
 func Load() Config {
@@ -68,22 +86,43 @@ func Load() Config {
 		XunhuAppID:        get("XUNHUPAY_APPID", ""),
 		XunhuAppSecret:    get("XUNHUPAY_APPSECRET", ""),
 		XunhuAPIBase:      get("XUNHUPAY_API_BASE", "https://api.xunhupay.com/payment/do.html"),
+		XunhuQueryURL:     get("XUNHUPAY_QUERY_URL", "https://api.xunhupay.com/payment/query.html"),
 		XunhuNotifyURL:    get("XUNHUPAY_NOTIFY_URL", ""),
 		XunhuReturnURL:    get("XUNHUPAY_RETURN_URL", ""),
 		Environment:       get("APP_ENV", "development"),
+		PaymentOrderTTL:   getDuration("PAYMENT_ORDER_TTL", 2*time.Hour),
 		RatePaymentNotify: getInt("RATE_PAYMENT_NOTIFY_PER_MIN", 120),
 		RateOIDCToken:     getInt("RATE_OIDC_TOKEN_PER_MIN", 60),
 		RateProductToken:  getInt("RATE_PRODUCT_TOKEN_PER_MIN", 5),
 		AdminEmails:       splitCSV(get("ADMIN_EMAILS", "")),
-		OIDCIssuer:        strings.TrimRight(get("OIDC_ISSUER", "https://www.roostbots.com/console-api"), "/"),
-		OIDCClientID:      get("OIDC_CLIENT_ID", "roostbot"),
-		OIDCClientSecret:  get("OIDC_CLIENT_SECRET", ""),
-		OIDCRedirectURIs:  get("OIDC_REDIRECT_URIS", ""),
-		OIDCConsentURL:    get("OIDC_CONSENT_URL", "https://www.roostbots.com/console/oauth/authorize"),
-		MarketAPIURL:      strings.TrimRight(get("MARKET_API_URL", "https://www.roostbots.com/api"), "/"),
-		ConsoleAPIURL:     strings.TrimRight(get("CONSOLE_API_URL", "https://www.roostbots.com/console-api"), "/"),
-		MemoryMCPURL:      strings.TrimRight(get("CAUSAL_MEMORY_MCP_URL", get("MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp")), "/"),
+
+		ReferralInviterCredits: getInt64("REFERRAL_INVITER_CREDITS", DefaultReferralInviterCredits),
+		ReferralInviteeCredits: getInt64("REFERRAL_INVITEE_CREDITS", DefaultReferralInviteeCredits),
+		ReferralMaxUses:        getInt("REFERRAL_MAX_USES_PER_CODE", 0),
+		RateReferralClaim:      getInt("RATE_REFERRAL_CLAIM_PER_MIN", 10),
+
+		OIDCIssuer:         strings.TrimRight(get("OIDC_ISSUER", "https://www.roostbots.com/console-api"), "/"),
+		OIDCClientID:       get("OIDC_CLIENT_ID", "roostbot"),
+		OIDCClientSecret:   get("OIDC_CLIENT_SECRET", ""),
+		OIDCRedirectURIs:   get("OIDC_REDIRECT_URIS", ""),
+		OIDCConsentURL:     get("OIDC_CONSENT_URL", "https://www.roostbots.com/console/oauth/authorize"),
+		MarketAPIURL:       strings.TrimRight(get("MARKET_API_URL", "https://www.roostbots.com/api"), "/"),
+		ConsoleAPIURL:      strings.TrimRight(get("CONSOLE_API_URL", "https://www.roostbots.com/console-api"), "/"),
+		MemoryMCPURL:       strings.TrimRight(get("CAUSAL_MEMORY_MCP_URL", get("MEMORY_MCP_URL", "https://causal-memory.com/memory/mcp")), "/"),
+		MemoryTokenPushURL: strings.TrimRight(get("CAUSAL_MEMORY_TOKEN_PUSH_URL", "https://causal-memory.com/memory/__token"), "/"),
 	}
+}
+
+func getDuration(k string, d time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(k))
+	if raw == "" {
+		return d
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed <= 0 {
+		return d
+	}
+	return parsed
 }
 
 func getInt(k string, d int) int {
@@ -97,6 +136,20 @@ func getInt(k string, d int) int {
 			return d
 		}
 		n = n*10 + int(r-'0')
+	}
+	return n
+}
+
+// getInt64 parses a non-negative int64 env value. Invalid or negative values
+// fall back to the default, so a typo cannot silently disable rewards.
+func getInt64(k string, d int64) int64 {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return d
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return d
 	}
 	return n
 }

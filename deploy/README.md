@@ -23,8 +23,28 @@ roost-console-api.service       systemd
 
 - 虎皮椒 `XUNHUPAY_APPID` / `XUNHUPAY_APPSECRET`
 - `XUNHUPAY_NOTIFY_URL=https://www.roostbots.com/console-api/v1/payments/xunhupay/notify`
+- `XUNHUPAY_QUERY_URL`（可选，默认 `https://api.xunhupay.com/payment/query.html`）：
+  API 每 60 秒用它主动查单，回调丢失也能补单
+- `PAYMENT_ORDER_TTL`（可选，默认 `2h`）：超时的 created/pending 订单
+  自动置为 expired，不再长期显示“处理中”
 - 生产数据库角色 `roost_api` 和密码
 - DNS：`console.roostbots.com` / `api.roostbots.com`（如需独立域名）
+
+## 支付运维
+
+- 回调丢失/验签失败导致订单停在 pending 时，管理员手动补单：
+
+```bash
+curl -X POST https://www.roostbots.com/console-api/v1/admin/orders/<orderID>/fulfill \
+  -H "Authorization: Bearer <admin-supabase-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{"provider_trade_no":"<虎皮椒交易号>"}'
+```
+
+  幂等：已 fulfilled 再次调用返回 `already_fulfilled`；refunded 拒绝。
+- 日志关注：`xunhupay notify bad signature`、`order reconciled as paid`、
+  `expired stale orders`。
+- 前端订单页对 pending 订单直接给“去支付”入口。
 
 可选公开基址（CLI 引导配置 `GET /v1/cli/config` 会返回，默认值已指向现网；
 staging 时按需覆盖，均为公开值不是 secret）：

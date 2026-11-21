@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
-	"net"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +38,90 @@ func supabaseHTTPClient(cfg config.Config) *http.Client {
 	return &http.Client{Timeout: 15 * time.Second, Transport: transport}
 }
 
+// startPaymentJobs closes abandoned checkouts and reconciles pending orders
+// against the provider. A webhook alone is not a delivery guarantee: if the
+// notify is lost or rejected the order must still be fulfilled, and an
+// abandoned checkout must not read as "in progress" forever.
+func startPaymentJobs(ctx context.Context, cfg config.Config, store *billing.Store, pay *payment.Client, log *slog.Logger) {
+	if store == nil {
+		return
+	}
+	go func() {
+		tick := func() {
+			runCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			// Reconcile before expiring: a paid order whose notify was lost must
+			// be fulfilled while it can still be queried, not closed as stale.
+			if cfg.PaymentConfigured() {
+				reconcileOrders(runCtx, store, pay, log)
+			}
+			if n, err := store.ExpireStaleOrders(runCtx, cfg.PaymentOrderTTL); err != nil {
+				log.Warn("order expiry failed", "err", err)
+			} else if n > 0 {
+				log.Info("expired stale orders", "count", n)
+			}
+		}
+		tick()
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			tick()
+		}
+	}()
+}
+
+// reconcileOrders queries the provider for pending orders whose notify should
+// have arrived by now. Paid orders are fulfilled; cancelled checkouts are
+// closed. Failures are logged and retried on the next tick.
+func reconcileOrders(ctx context.Context, store *billing.Store, pay *payment.Client, log *slog.Logger) {
+	orders, err := store.ListReconcileOrders(ctx, 2*time.Minute, 20)
+	if err != nil {
+		log.Warn("order reconcile list failed", "err", err)
+		return
+	}
+	for _, order := range orders {
+		result, err := pay.Query(ctx, order.OutTradeNo)
+		// Back off this order for 10 minutes even on error: a broken secret or
+		// provider outage must not turn into a per-minute query storm.
+		if touchErr := store.TouchOrderReconcile(ctx, order.ID); touchErr != nil {
+			log.Warn("order reconcile touch failed", "order", order.ID, "err", touchErr)
+		}
+		if err != nil {
+			log.Warn("order reconcile query failed", "order", order.ID, "err", err)
+			continue
+		}
+		switch result.Status {
+		case "OD":
+			raw, _ := json.Marshal(result.Raw)
+			tradeNo := reconciledTradeNo(result.Raw, order.ID)
+			if err := store.Fulfill(ctx, order.ID, tradeNo, order.AmountCents, raw); err != nil {
+				log.Error("order reconcile fulfill failed", "order", order.ID, "err", err)
+				continue
+			}
+			log.Info("order reconciled as paid", "order", order.ID, "out_trade_no", order.OutTradeNo)
+		case "CD":
+			if err := store.CloseOrder(ctx, order.ID, "expired"); err != nil {
+				log.Warn("order reconcile close failed", "order", order.ID, "err", err)
+				continue
+			}
+			log.Info("order reconciled as cancelled", "order", order.ID, "out_trade_no", order.OutTradeNo)
+		}
+	}
+}
+
+// reconciledTradeNo prefers the provider's own identifiers so the row matches
+// any later notify; the fallback is unique per order.
+func reconciledTradeNo(raw map[string]any, orderID string) string {
+	if data, ok := raw["data"].(map[string]any); ok {
+		for _, key := range []string{"transaction_id", "trade_no", "open_order_id"} {
+			if value, ok := data[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return "query_" + orderID
+}
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg := config.Load()
@@ -60,21 +146,23 @@ func main() {
 	verifier := auth.NewVerifier(cfg.SupabaseURL, cfg.SupabaseAnonKey, supabaseHTTPClient(cfg))
 	pay := &payment.Client{
 		AppID: cfg.XunhuAppID, AppSecret: cfg.XunhuAppSecret, APIBase: cfg.XunhuAPIBase,
+		QueryURL:  cfg.XunhuQueryURL,
 		NotifyURL: cfg.XunhuNotifyURL, ReturnURL: cfg.XunhuReturnURL, HTTP: &http.Client{Timeout: 20 * time.Second},
 	}
 	srv := httpapi.New(cfg, store, verifier, pay, log)
-go func() {
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		n, err := store.ExpireLeases(context.Background())
-		if err != nil {
-			log.Warn("lease expiry failed", "err", err)
-		} else if n > 0 {
-			log.Info("expired stale leases", "count", n)
+	startPaymentJobs(context.Background(), cfg, store, pay, log)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			n, err := store.ExpireLeases(context.Background())
+			if err != nil {
+				log.Warn("lease expiry failed", "err", err)
+			} else if n > 0 {
+				log.Info("expired stale leases", "count", n)
+			}
 		}
-	}
-}()
+	}()
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           srv.Handler(),

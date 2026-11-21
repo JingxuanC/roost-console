@@ -404,6 +404,13 @@ POST /internal/v1/usage/leases/{lease_id}/settle
   → { settled, balance }
 
 POST /internal/v1/usage/leases/{lease_id}/release
+
+POST /internal/v1/usage/sandbox
+  { org_id, product, sandbox_id, ..., total_credits?, idempotency_key }
+  → { id, charged_credits, balance_credits }
+
+GET /v1/orgs/{orgID}/billing/details?days=30
+  → { summary, tokens[], sandboxes[] }   用户自助扣费明细
 ```
 
 认证：
