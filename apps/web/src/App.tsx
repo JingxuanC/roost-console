@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { supabase } from './lib/supabase';
+import { redeemEmailTokenHash } from './lib/emailConfirm';
 import { api, type AdminOrg, type AdminOverview, type AdminOverviewDaily, type AdminReferrals, type BillingDetails, type BillingSandboxRow, type BillingTokenRow, type BillingView, type MeResponse, type Order, type Plan, type ReferralOverview, type RelayKey, type UsageDailyRow, type UsageRecentRow, type UsageTotals } from './lib/api';
 
 const PRODUCT_LABELS: Record<string, string> = {
@@ -193,11 +194,11 @@ function Logo() {
   );
 }
 
-function AuthScreen() {
+function AuthScreen({ initialError = '' }: { initialError?: string }) {
   const [mode, setMode] = useState<'login' | 'signup'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(initialError);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [refCode, setRefCode] = useState(() => referralCodeFromLocation() || storedReferralCode());
@@ -2218,22 +2219,35 @@ function Console({ session }: { session: Session }) {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [confirmError, setConfirmError] = useState('');
 
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
+    let cancelled = false;
+    const boot = async () => {
+      // Email links may carry a token_hash (the portable shape). Redeem it
+      // before reading the session so the same page load lands signed in.
+      const redeemed = await redeemEmailTokenHash();
+      if (cancelled) return;
+      if (redeemed.handled && redeemed.error) setConfirmError(redeemed.error);
+      const { data } = await supabase.auth.getSession();
+      if (cancelled) return;
       setSession(data.session);
       setLoading(false);
-    });
+    };
+    void boot();
     const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   const isOAuth = window.location.pathname.includes('/oauth/authorize');
   const view = useMemo(() => {
     if (loading) return <div className="loading"><p>加载中…</p></div>;
-    if (isOAuth) return session ? <OAuthAuthorize session={session} /> : <AuthScreen />;
-    return session ? <Console session={session} /> : <AuthScreen />;
-  }, [isOAuth, loading, session]);
+    if (isOAuth) return session ? <OAuthAuthorize session={session} /> : <AuthScreen initialError={confirmError} />;
+    return session ? <Console session={session} /> : <AuthScreen initialError={confirmError} />;
+  }, [confirmError, isOAuth, loading, session]);
 
   return view;
 }
