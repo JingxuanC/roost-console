@@ -1115,8 +1115,12 @@ function CausalMemory({ token, orgId }: { token: string; orgId: string }) {
   );
 }
 
-function Recharge({ current, alwaysOnUntil, onBuy, busy }: { current: string; alwaysOnUntil?: string | null; onBuy: (sku: string) => void; busy: string }) {
+function Recharge({ current, alwaysOnUntil, onBuy, busy }: { current: string; alwaysOnUntil?: string | null; onBuy: (sku: string, amountCents?: number) => void; busy: string }) {
   const addon = current === 'pro' || current === 'max';
+  const [customYuan, setCustomYuan] = useState('200');
+  const customValue = Number(customYuan);
+  const customCents = Math.round(customValue * 100);
+  const customValid = Number.isFinite(customValue) && customCents >= 1000 && customCents <= 500000;
   return (
     <section className="section" id="recharge">
       <div className="section__head">
@@ -1134,6 +1138,28 @@ function Recharge({ current, alwaysOnUntil, onBuy, busy }: { current: string; al
             </button>
           </article>
         ))}
+        <article className="recharge-card recharge-card--custom">
+          <p className="recharge-card__credits">自定义金额</p>
+          <div className="recharge-card__amount">
+            <span>¥</span>
+            <input
+              inputMode="decimal"
+              value={customYuan}
+              onChange={(e) => setCustomYuan(e.target.value.replace(/[^0-9.]/g, ''))}
+              aria-label="充值金额（元）"
+            />
+          </div>
+          <p className="recharge-card__note">
+            ¥10–¥5000；1 credit = ¥0.01，到账 {customValid ? credits(customCents) : '—'} credits。
+          </p>
+          <button
+            className="btn btn--ink btn--wide"
+            disabled={!customValid || busy === 'credit_custom'}
+            onClick={() => onBuy('credit_custom', customCents)}
+          >
+            {busy === 'credit_custom' ? '创建订单…' : customValid ? `充值 ¥${customValue}` : '请输入 ¥10–¥5000'}
+          </button>
+        </article>
         {addon && (
           <article className="recharge-card">
             <p className="recharge-card__credits">Always-on 沙箱</p>
@@ -2177,11 +2203,11 @@ function Console({ session }: { session: Session }) {
     return () => { cancelled = true; };
   }, [me, token, load]);
 
-  async function buy(sku: string) {
+  async function buy(sku: string, amountCents?: number) {
     setBusy(sku);
     setError('');
     try {
-      const { order } = await api.createOrder(token, sku);
+      const { order } = await api.createOrder(token, sku, amountCents);
       setPendingOrder(order);
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建订单失败');

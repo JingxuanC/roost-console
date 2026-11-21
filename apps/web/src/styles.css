@@ -524,3 +524,9 @@ button { cursor: pointer; }
 .recharge-card__price span { font-size: 11px; color: var(--muted); }
 .recharge-card__note { margin: 0; flex: 1; font-size: 11px; line-height: 1.6; color: var(--ink-2); }
 @media (max-width: 860px) { .recharge-grid { grid-template-columns: 1fr; } }
+
+/* Custom top-up amount */
+.recharge-card--custom .recharge-card__amount { display: flex; align-items: baseline; gap: 6px; }
+.recharge-card--custom .recharge-card__amount > span { font-family: var(--serif); font-size: 24px; }
+.recharge-card--custom .recharge-card__amount input { width: 100%; min-width: 0; border: 0; border-bottom: 1px solid var(--line-strong); background: transparent; padding: 2px 0; font-family: var(--serif); font-size: 30px; color: var(--ink); outline: none; }
+.recharge-card--custom .recharge-card__amount input:focus { border-color: var(--ink); }

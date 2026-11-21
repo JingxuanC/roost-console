@@ -657,6 +657,9 @@ func (s *Server) listOrders(w http.ResponseWriter, r *http.Request) {
 
 type createOrderRequest struct {
 	SKU string `json:"sku"`
+	// AmountCents is only read for the custom top-up SKU; every other SKU is
+	// priced server-side by Quote and ignores it.
+	AmountCents int64 `json:"amount_cents"`
 }
 
 type orderResponse struct {
@@ -677,12 +680,27 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "sku is required")
 		return
 	}
-	order, err := s.store.CreateOrder(r.Context(), org.ID, req.SKU)
-	if err != nil {
-		s.fail(w, err)
-		return
+	var order billing.Order
+	var pack billing.CreditPack
+	if req.SKU == billing.CustomTopUpSKU {
+		pack, err = billing.CustomTopUpQuote(req.AmountCents)
+		if err != nil {
+			if errors.Is(err, billing.ErrInvalidTopUpAmount) {
+				writeError(w, http.StatusBadRequest, "invalid_amount", "custom top-up must be between ¥10 and ¥5000")
+				return
+			}
+			s.fail(w, err)
+			return
+		}
+		order, err = s.store.CreateCustomOrder(r.Context(), org.ID, req.AmountCents)
+	} else {
+		pack, _, err = s.store.Quote(r.Context(), req.SKU)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		order, err = s.store.CreateOrder(r.Context(), org.ID, req.SKU)
 	}
-	pack, _, err := s.store.Quote(r.Context(), req.SKU)
 	if err != nil {
 		s.fail(w, err)
 		return
