@@ -156,7 +156,7 @@ func (s *Store) BillingDetails(ctx context.Context, orgID string, days int) (Bil
 		where org_id=$1 and created_at >= `+usageSince+`
 		  and delta_credits < 0
 		  and reason in ('usage','relay_usage')
-		  and product in ('relay','dslpha','causal-memory')`, orgID, days).
+		  and product in ('relay','dsalpha','causal-memory')`, orgID, days).
 		Scan(&tokenCredits); err != nil {
 		return BillingDetails{}, err
 	}
@@ -168,7 +168,7 @@ func (s *Store) BillingDetails(ctx context.Context, orgID string, days int) (Bil
 	if err := s.Pool.QueryRow(ctx, `
 		select coalesce(sum(total_credits),0)::bigint,
 		       coalesce(sum(credits_minor),0)::bigint,
-		       count(*)::bigint
+		       count(distinct nullif(sandbox_id,''))::bigint
 		from billing.sandbox_usage
 		where org_id=$1 and created_at >= `+usageSince, orgID, days).
 		Scan(&sandboxCredits, &sandboxMinor, &sandboxCount); err != nil {
@@ -214,7 +214,7 @@ func (s *Store) BillingDetails(ctx context.Context, orgID string, days int) (Bil
 			where l.org_id=$1 and l.created_at >= `+usageSince+`
 			  and l.delta_credits < 0
 			  and l.reason in ('usage','relay_usage')
-			  and l.product in ('relay','dslpha','causal-memory')
+			  and l.product in ('relay','dsalpha','causal-memory')
 			group by l.ref_id
 		), attribution as (
 			select ev.model,

@@ -130,7 +130,7 @@ func TestAdminOverviewDB(t *testing.T) {
 	insertLedger(orgA, "relay", "relay_usage", -100, 0)
 	insertLedger(orgA, "market", "usage", -200, 0)
 	insertLedger(orgA, "causal-memory", "usage", -50, 0)
-	insertLedger(orgA, "dslpha", "usage", -70, 0)
+	insertLedger(orgA, "dsalpha", "usage", -70, 0)
 	insertLedger(orgA, "relay", "admin_adjust", -1_000_000, 0)
 	insertLedger(orgA, "", "free_grant", 1_000_000, 0)
 	insertLedger(orgA, "", "payment", 500_000, 0)
